@@ -271,6 +271,8 @@ state.comboBuilderItems = [];
 state.lastSyncAt = Number(localStorage.getItem('cafeteria_last_sync_at') || '0');
 state.forceLogoutAt = Number(localStorage.getItem('cafeteria_force_logout_at') || '0');
 state.cashBoxes = JSON.parse(localStorage.getItem('cafeteria_cash_boxes') || '[]');
+state.selectedClosingIds = [];
+state.generatedClosingsStats = null;
 
 let appConfig = {
   stockActivo: Boolean(state.stockConfig?.enabled),
@@ -374,9 +376,10 @@ function ensureUsers() {
   if (!state.users.find((u) => u.username === 'admin')) {
     state.users.push({ username: 'admin', password: '5432', permissions: defaultPermissions(), createdBy: 'admin' });
   }
-  if (!state.users.find((u) => u.username === 'seba')) {
-    state.users.push({ username: 'seba', password: '5432', permissions: { closeCash: false, deleteSales: false, accessSettings: false, manageProducts: false, manageCombos: false, editProductPrices: false, viewOrders: false, deleteClosings: false, deleteCashMovements: false, clearDeletedSalesHistory: false, manageUsers: false, viewSalesButton: false, viewSettingsButton: false, viewCloseCashButton: false, viewProductsTab: false, viewConfigVentasTab: false, viewDebtorsTab: false, viewSummaryTab: false, viewClosingsTab: false }, createdBy: 'admin' });
-  }
+  state.users = state.users.map((u) => ({
+    ...u,
+    permissions: { ...defaultPermissions(), ...(u.permissions || {}) }
+  }));
 }
 
 function currentUserRecord() {
@@ -648,8 +651,288 @@ function renderCashStatus() {
   cashStatus.textContent = `Caja ABIERTA desde ${new Date(activeCash.fecha_apertura).toLocaleString()} por ${activeCash.usuario_apertura}. Monto inicial: ${money(activeCash.openingCash || 0)}.`;
 }
 
+function formatDurationMs(ms) {
+  const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function getClosingAggregates(closing) {
+  const sales = Array.isArray(closing?.salesSnapshot) ? closing.salesSnapshot : [];
+  const productsMap = new Map();
+  let qtyTotal = 0;
+  let saleMax = 0;
+  let saleMin = sales.length ? Number(sales[0].total || 0) : 0;
+  sales.forEach((sale) => {
+    const total = Number(sale.total || 0);
+    saleMax = Math.max(saleMax, total);
+    saleMin = Math.min(saleMin, total);
+    (sale.items || []).forEach((it) => {
+      const name = it.name || 'Producto';
+      if (!productsMap.has(name)) productsMap.set(name, { qty: 0, total: 0 });
+      const row = productsMap.get(name);
+      row.qty += Number(it.qty || 0);
+      row.total += Number((it.finalSubtotal ?? (it.price * it.qty)) || 0);
+      qtyTotal += Number(it.qty || 0);
+    });
+  });
+  const products = [...productsMap.entries()].map(([name, row]) => ({ name, ...row })).sort((a,b)=>b.qty-a.qty);
+  const topByQty = products[0] || null;
+  const topByAmount = products.slice().sort((a,b)=>b.total-a.total)[0] || null;
+  const net = Number(closing.cashIn || 0) + Number(closing.qrIn || 0);
+  const opening = Number(closing.openingCash || 0);
+  const outflows = Array.isArray(closing.outflowsSnapshot) ? closing.outflowsSnapshot : [];
+  const outTotal = outflows.filter((m)=>m.direction==='salida').reduce((a,m)=>a+Number(m.amount||0),0);
+  const inTotal = outflows.filter((m)=>m.direction==='entrada').reduce((a,m)=>a+Number(m.amount||0),0);
+  const expected = opening + Number(closing.cashIn || 0) + inTotal - outflows.filter((m)=>m.direction==='salida' && m.method==='efectivo').reduce((a,m)=>a+Number(m.amount||0),0);
+  const counted = Number(closing.finalCashInBox || 0);
+  const diff = counted - expected;
+  return {
+    sales,
+    products,
+    qtyTotal,
+    saleMax,
+    saleMin: sales.length ? saleMin : 0,
+    avgTicket: sales.length ? net / sales.length : 0,
+    topByQty,
+    topByAmount,
+    productsDistinct: products.length,
+    net,
+    opening,
+    outTotal,
+    inTotal,
+    expected,
+    counted,
+    diff,
+    cash: Number(closing.cashIn || 0),
+    qr: Number(closing.qrIn || 0),
+    transfer: Number(closing.transferIn || 0),
+    others: Math.max(0, net - Number(closing.cashIn || 0) - Number(closing.qrIn || 0) - Number(closing.transferIn || 0))
+  };
+}
+
+async function ensureJsPdfLibs() {
+  if (window.jspdf?.jsPDF) return;
+  const load = (src) => new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = reject;
+    document.head.appendChild(el);
+  });
+  await load('https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js');
+  await load('https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js');
+}
+
+async function downloadClosingPdf(closingId) {
+  const closing = state.cashClosings.find((c) => c.id === closingId);
+  if (!closing) return;
+  try {
+    await ensureJsPdfLibs();
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const agg = getClosingAggregates(closing);
+    const y0 = 12;
+    doc.setFontSize(14);
+    doc.text((state.settings?.title1 || 'Mi Cafetería'), 14, y0);
+    doc.setFontSize(10);
+    doc.text(`Generado: ${new Date().toLocaleString()}`, 14, y0 + 6);
+    doc.setFontSize(13);
+    doc.text('REPORTE DE CIERRE DE CAJA', 105, y0 + 14, { align: 'center' });
+    doc.setFontSize(10);
+    const general = [
+      ['Número de cierre', String(closing.id || '-').slice(-8)],
+      ['Fecha apertura', new Date(closing.openedAt || closing.fecha_apertura || closing.closedAt).toLocaleDateString()],
+      ['Hora apertura', new Date(closing.openedAt || closing.fecha_apertura || closing.closedAt).toLocaleTimeString()],
+      ['Fecha cierre', new Date(closing.closedAt).toLocaleDateString()],
+      ['Hora cierre', new Date(closing.closedAt).toLocaleTimeString()],
+      ['Usuario apertura', closing.usuario_apertura || '-'],
+      ['Usuario cierre', closing.usuario_cierre || '-'],
+      ['Tiempo abierto', formatDurationMs(new Date(closing.closedAt) - new Date(closing.openedAt || closing.fecha_apertura || closing.closedAt))]
+    ];
+    doc.autoTable({ startY: y0 + 18, head: [['Información general', 'Valor']], body: general, theme: 'grid' });
+    const fy = doc.lastAutoTable.finalY + 4;
+    const fin = [
+      ['Monto inicial', money(agg.opening)],
+      ['Total ventas brutas', money(agg.net)],
+      ['Total descuentos', money(Number(closing.discountTotal || 0))],
+      ['Total ingresos netos', money(agg.net)],
+      ['Total efectivo', money(agg.cash)],
+      ['Total transferencias', money(agg.transfer)],
+      ['Total QR', money(agg.qr)],
+      ['Otros métodos', money(agg.others)],
+      ['Total gastos', money(agg.outTotal)],
+      ['Total esperado', money(agg.expected)],
+      ['Total contado', money(agg.counted)],
+      ['Diferencia', money(agg.diff)],
+      ['Estado final', agg.diff === 0 ? 'CUADRADO' : (agg.diff > 0 ? 'SOBRANTE' : 'FALTANTE')]
+    ];
+    doc.autoTable({ startY: fy, head: [['Resumen financiero', 'Valor']], body: fin, theme: 'grid' });
+    const oy = doc.lastAutoTable.finalY + 4;
+    const ops = [
+      ['Cantidad total de ventas', String(closing.salesCount || agg.sales.length)],
+      ['Total productos vendidos', String(agg.qtyTotal)],
+      ['Ticket promedio', money(agg.avgTicket)],
+      ['Venta más alta', money(agg.saleMax)],
+      ['Venta más baja', money(agg.saleMin)]
+    ];
+    doc.autoTable({ startY: oy, head: [['Métricas operativas', 'Valor']], body: ops, theme: 'grid' });
+    doc.addPage();
+    doc.autoTable({ startY: 12, head: [['Producto', 'Cantidad', 'Total generado']], body: agg.products.map((p)=>[p.name, String(p.qty), money(p.total)]), theme: 'grid' });
+    const py = doc.lastAutoTable.finalY + 4;
+    const totalNet = Math.max(1, agg.net);
+    const mpay = [
+      ['Efectivo', `${money(agg.cash)} (${((agg.cash/totalNet)*100).toFixed(1)}%)`],
+      ['Transferencia', `${money(agg.transfer)} (${((agg.transfer/totalNet)*100).toFixed(1)}%)`],
+      ['QR', `${money(agg.qr)} (${((agg.qr/totalNet)*100).toFixed(1)}%)`],
+      ['Otros', `${money(agg.others)} (${((agg.others/totalNet)*100).toFixed(1)}%)`]
+    ];
+    doc.autoTable({ startY: py, head: [['Método', 'Monto']], body: mpay, theme: 'grid' });
+    doc.save(`cierre_${String(closing.id || '').slice(-8)}.pdf`);
+  } catch (err) {
+    console.error('[pdf] cierre', err);
+    alert('No se pudo generar el PDF del cierre.');
+  }
+}
+
+function ensureClosingsStatsUI() {
+  const panel = document.getElementById('cierres');
+  if (!panel || document.getElementById('closingsStatsCard')) return;
+  const card = document.createElement('div');
+  card.id = 'closingsStatsCard';
+  card.className = 'card';
+  card.innerHTML = '<div class="grid3"><button id="selectClosingsBtn" class="secondary" type="button">Seleccionar cierres</button><button id="generateClosingsStatsBtn" class="primary" type="button" disabled>Generar estadísticas</button><button id="downloadClosingsStatsPdfBtn" class="secondary" type="button" disabled>Descargar PDF</button></div><p id="selectedClosingsInfo" class="muted">Cantidad de cierres seleccionados: 0</p><div id="closingsStatsOutput"></div>';
+  panel.insertBefore(card, panel.children[1] || null);
+}
+
+function activeClosingsList() {
+  return (state.cashClosings || []).slice().sort((a,b)=>new Date(b.closedAt)-new Date(a.closedAt));
+}
+
+function openSelectClosingsModal() {
+  document.getElementById('selectClosingsOverlay')?.remove();
+  const list = activeClosingsList();
+  const ov = document.createElement('div');
+  ov.id = 'selectClosingsOverlay';
+  ov.className = 'modal';
+  ov.innerHTML = `<div class="modal-card"><h3>LISTADO DE CIERRES ACTIVOS</h3><div class="grid2"><button id="selectAllClosingsBtn" class="secondary" type="button">Seleccionar todo</button><button id="acceptClosingsSelectionBtn" class="primary" type="button">Aceptar</button></div><table><thead><tr><th></th><th>Nro cierre</th><th>Fecha apertura</th><th>Fecha cierre</th><th>Usuario</th><th>Total generado</th></tr></thead><tbody id="selectClosingsTable"></tbody></table><button id="closeSelectClosingsBtn" class="secondary" type="button">Cerrar</button></div>`;
+  document.body.appendChild(ov);
+  const tbody = ov.querySelector('#selectClosingsTable');
+  tbody.innerHTML = list.map((c)=>`<tr><td><input type="checkbox" data-sc-id="${c.id}" ${state.selectedClosingIds.includes(c.id)?'checked':''} /></td><td>${String(c.id||'-').slice(-8)}</td><td>${new Date(c.openedAt || c.closedAt).toLocaleString()}</td><td>${new Date(c.closedAt).toLocaleString()}</td><td>${c.usuario_cierre || c.usuario_apertura || '-'}</td><td>${money(Number(c.cashIn||0)+Number(c.qrIn||0))}</td></tr>`).join('');
+  ov.querySelector('#closeSelectClosingsBtn').onclick = () => ov.remove();
+  ov.querySelector('#selectAllClosingsBtn').onclick = () => {
+    ov.querySelectorAll('input[data-sc-id]').forEach((ch)=>{ ch.checked = true; });
+  };
+  ov.querySelector('#acceptClosingsSelectionBtn').onclick = () => {
+    const ids = [...ov.querySelectorAll('input[data-sc-id]:checked')].map((ch)=>ch.dataset.scId);
+    if (!ids.length) return alert('Debe seleccionar al menos un cierre');
+    state.selectedClosingIds = ids;
+    const info = document.getElementById('selectedClosingsInfo');
+    if (info) info.textContent = `Cantidad de cierres seleccionados: ${ids.length}`;
+    const genBtn = document.getElementById('generateClosingsStatsBtn');
+    if (genBtn) genBtn.disabled = false;
+    ov.remove();
+  };
+}
+
+function buildStatsFromSelectedClosings() {
+  const selected = activeClosingsList().filter((c)=>state.selectedClosingIds.includes(c.id));
+  const stats = {
+    selected,
+    count: selected.length,
+    salesCount: 0,
+    totalIncome: 0,
+    cash: 0,
+    transfer: 0,
+    qr: 0,
+    others: 0,
+    expenses: 0,
+    productsTotalQty: 0,
+    productsMap: new Map(),
+    usersMap: new Map()
+  };
+  selected.forEach((c) => {
+    const agg = getClosingAggregates(c);
+    stats.salesCount += Number(c.salesCount || agg.sales.length || 0);
+    stats.totalIncome += agg.net;
+    stats.cash += agg.cash;
+    stats.transfer += agg.transfer;
+    stats.qr += agg.qr;
+    stats.others += agg.others;
+    stats.expenses += agg.outTotal;
+    stats.productsTotalQty += agg.qtyTotal;
+    agg.products.forEach((p) => {
+      if (!stats.productsMap.has(p.name)) stats.productsMap.set(p.name, { qty: 0, total: 0 });
+      const row = stats.productsMap.get(p.name);
+      row.qty += p.qty;
+      row.total += p.total;
+    });
+    const user = c.usuario_cierre || c.usuario_apertura || '-';
+    if (!stats.usersMap.has(user)) stats.usersMap.set(user, { closings: 0, total: 0 });
+    const ur = stats.usersMap.get(user);
+    ur.closings += 1;
+    ur.total += agg.net;
+  });
+  stats.avgTicket = stats.salesCount ? stats.totalIncome / stats.salesCount : 0;
+  stats.products = [...stats.productsMap.entries()].map(([name,row])=>({name,...row}));
+  stats.productsTopQty = stats.products.slice().sort((a,b)=>b.qty-a.qty)[0] || null;
+  stats.productsTopAmount = stats.products.slice().sort((a,b)=>b.total-a.total)[0] || null;
+  stats.top5 = stats.products.slice().sort((a,b)=>b.qty-a.qty).slice(0,5);
+  stats.users = [...stats.usersMap.entries()].map(([user,row])=>({user,...row}));
+  const payTotal = Math.max(1, stats.totalIncome);
+  stats.paymentPct = {
+    cash: (stats.cash / payTotal) * 100,
+    transfer: (stats.transfer / payTotal) * 100,
+    qr: (stats.qr / payTotal) * 100,
+    others: (stats.others / payTotal) * 100
+  };
+  stats.mostUsedMethod = Object.entries({Efectivo:stats.cash,Transferencia:stats.transfer,QR:stats.qr,Otros:stats.others}).sort((a,b)=>b[1]-a[1])[0]?.[0] || '-';
+  return stats;
+}
+
+function renderClosingsStatsOutput(stats) {
+  const out = document.getElementById('closingsStatsOutput');
+  if (!out) return;
+  out.innerHTML = `<div class="card"><h4>Resumen general</h4><p>Total ventas: ${stats.salesCount}</p><p>Total ingresos: ${money(stats.totalIncome)}</p><p>Total efectivo: ${money(stats.cash)}</p><p>Total transferencias: ${money(stats.transfer)}</p><p>Total QR: ${money(stats.qr)}</p><p>Total gastos: ${money(stats.expenses)}</p><p>Ticket promedio global: ${money(stats.avgTicket)}</p><p>Total productos vendidos: ${stats.productsTotalQty}</p><p>Cierres seleccionados: ${stats.count}</p></div><div class="card"><h4>Productos</h4><p>Producto más vendido: ${stats.productsTopQty ? `${stats.productsTopQty.name} (${stats.productsTopQty.qty})` : '-'}</p><p>Producto que más dinero generó: ${stats.productsTopAmount ? `${stats.productsTopAmount.name} (${money(stats.productsTopAmount.total)})` : '-'}</p><p>Total productos distintos vendidos: ${stats.products.length}</p><table><thead><tr><th>Top 5 productos</th><th>Cantidad</th><th>Total</th></tr></thead><tbody>${stats.top5.map((p)=>`<tr><td>${p.name}</td><td>${p.qty}</td><td>${money(p.total)}</td></tr>`).join('') || '<tr><td colspan="3">Sin datos</td></tr>'}</tbody></table></div><div class="card"><h4>Métodos de pago</h4><p>Efectivo: ${money(stats.cash)} (${stats.paymentPct.cash.toFixed(1)}%)</p><p>Transferencia: ${money(stats.transfer)} (${stats.paymentPct.transfer.toFixed(1)}%)</p><p>QR: ${money(stats.qr)} (${stats.paymentPct.qr.toFixed(1)}%)</p><p>Otros: ${money(stats.others)} (${stats.paymentPct.others.toFixed(1)}%)</p><p>Método más utilizado: ${stats.mostUsedMethod}</p></div><div class="card"><h4>Usuarios</h4><table><thead><tr><th>Usuario</th><th>Cierres</th><th>Total generado</th></tr></thead><tbody>${stats.users.map((u)=>`<tr><td>${u.user}</td><td>${u.closings}</td><td>${money(u.total)}</td></tr>`).join('') || '<tr><td colspan="3">Sin datos</td></tr>'}</tbody></table></div>`;
+}
+
+async function downloadClosingsStatsPdf() {
+  if (!state.generatedClosingsStats) return;
+  try {
+    await ensureJsPdfLibs();
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const st = state.generatedClosingsStats;
+    doc.setFontSize(14);
+    doc.text((state.settings?.title1 || 'Mi Cafetería'), 14, 12);
+    doc.setFontSize(10);
+    doc.text(`Generado: ${new Date().toLocaleString()}`, 14, 18);
+    doc.setFontSize(13);
+    doc.text('REPORTE DE ESTADÍSTICAS DE CIERRES SELECCIONADOS', 105, 26, { align: 'center' });
+    doc.setFontSize(10);
+    doc.text(`Cantidad de cierres seleccionados: ${st.count}`, 14, 34);
+    doc.autoTable({ startY: 38, head: [['Resumen general', 'Valor']], body: [
+      ['Total ventas', String(st.salesCount)], ['Total ingresos', money(st.totalIncome)], ['Total efectivo', money(st.cash)], ['Total transferencias', money(st.transfer)], ['Total QR', money(st.qr)], ['Total gastos', money(st.expenses)], ['Ticket promedio global', money(st.avgTicket)], ['Total productos vendidos', String(st.productsTotalQty)]
+    ] });
+    doc.autoTable({ startY: doc.lastAutoTable.finalY + 4, head: [['Producto', 'Cantidad', 'Total']], body: st.top5.map((p)=>[p.name,String(p.qty),money(p.total)]) });
+    doc.autoTable({ startY: doc.lastAutoTable.finalY + 4, head: [['Método de pago', 'Monto']], body: [
+      ['Efectivo', `${money(st.cash)} (${st.paymentPct.cash.toFixed(1)}%)`],
+      ['Transferencia', `${money(st.transfer)} (${st.paymentPct.transfer.toFixed(1)}%)`],
+      ['QR', `${money(st.qr)} (${st.paymentPct.qr.toFixed(1)}%)`],
+      ['Otros', `${money(st.others)} (${st.paymentPct.others.toFixed(1)}%)`]
+    ]});
+    doc.addPage();
+    doc.autoTable({ startY: 12, head: [['Usuario', 'Cierres', 'Total generado']], body: st.users.map((u)=>[u.user,String(u.closings),money(u.total)]) });
+    doc.save('estadisticas_cierres_seleccionados.pdf');
+  } catch (error) {
+    console.error('[pdf] stats', error);
+    alert('No se pudo generar el PDF de estadísticas.');
+  }
+}
 function renderCashClosings() {
   if (!cashClosingsTable) return;
+  ensureClosingsStatsUI();
   const month = closingsMonthFilter?.value || '';
   const list = month ? state.cashClosings.filter((c) => c.closedAt?.slice(0, 7) === month) : state.cashClosings;
   cashClosingsTable.innerHTML = '';
@@ -657,9 +940,10 @@ function renderCashClosings() {
     cashClosingsTable.innerHTML = '<tr><td colspan="9">No hay cierres para el filtro seleccionado.</td></tr>';
     return;
   }
-  list.forEach((c) => {
+  list.forEach((c, idx) => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${new Date(c.closedAt).toLocaleString()}</td><td>${money(c.openingCash)}</td><td>${money(c.cashIn)}</td><td>${money(c.qrIn)}</td><td>${money(c.debtPending || 0)}</td><td>${money(c.finalCashInBox)}</td><td>${c.salesCount || 0}</td><td><button class="secondary" data-closing-id="${c.id}" type="button">Ver detalle</button></td><td>${hasPermission('deleteClosings') ? `<button class=\"secondary\" data-closing-del=\"${c.id}\" type=\"button\">Eliminar</button>` : '-'}</td>`;
+    tr.innerHTML = `<td>${new Date(c.closedAt).toLocaleString()}</td><td>${money(c.openingCash)}</td><td>${money(c.cashIn)}</td><td>${money(c.qrIn)}</td><td>${money(c.debtPending || 0)}</td><td>${money(c.finalCashInBox)}</td><td>${c.salesCount || 0}</td><td><button class="secondary" data-closing-id="${c.id}" type="button">Ver detalle</button> <button class="secondary" data-closing-pdf="${c.id}" type="button">PDF</button></td><td>${hasPermission('deleteClosings') ? `<button class="secondary" data-closing-del="${c.id}" type="button">Eliminar</button>` : '-'}</td>`;
+    tr.dataset.closingNumber = String(idx + 1);
     cashClosingsTable.appendChild(tr);
   });
 }
@@ -668,7 +952,7 @@ function renderClosingDetails(closingId) {
   const closing = state.cashClosings.find((c) => c.id === closingId);
   if (!closing || !closingDetailsCard) return;
   closingDetailsCard.classList.remove('hidden');
-  if (closingDetailsTitle) closingDetailsTitle.textContent = `Detalle de cierre ${new Date(closing.closedAt).toLocaleString()}`;
+  if (closingDetailsTitle) closingDetailsTitle.textContent = `Detalle de cierre #${String(closing.id || '').slice(-8)}`;
   const deletedCount = Array.isArray(closing.deletedSalesSnapshot) ? closing.deletedSalesSnapshot.length : 0;
   const outflowCount = Array.isArray(closing.outflowsSnapshot) ? closing.outflowsSnapshot.length : 0;
   const debtPaymentsCount = Array.isArray(closing.debtPaymentsSnapshot) ? closing.debtPaymentsSnapshot.length : 0;
@@ -676,19 +960,24 @@ function renderClosingDetails(closingId) {
   const inCash = (closing.outflowsSnapshot || []).filter((m) => m.direction === 'entrada' && m.method === 'efectivo').reduce((a,m)=>a+Number(m.amount||0),0);
   const outQr = (closing.outflowsSnapshot || []).filter((m) => m.direction === 'salida' && m.method === 'qr').reduce((a,m)=>a+Number(m.amount||0),0);
   const inQr = (closing.outflowsSnapshot || []).filter((m) => m.direction === 'entrada' && m.method === 'qr').reduce((a,m)=>a+Number(m.amount||0),0);
-  if (closingSummaryText) closingSummaryText.innerHTML = `<p><strong>Inicio de caja:</strong> ${money(closing.openingCash || 0)} · <strong>Efectivo ventas:</strong> ${money(closing.cashIn)} · <strong>QR ventas:</strong> ${money(closing.qrIn)} · <strong>Final caja:</strong> ${money(closing.finalCashInBox)}</p><p><strong>Salidas efectivo:</strong> ${money(outCash)} · <strong>Entradas efectivo:</strong> ${money(inCash)} · <strong>Salidas QR:</strong> ${money(outQr)} · <strong>Entradas QR:</strong> ${money(inQr)}</p><p><strong>Ventas eliminadas:</strong> ${deletedCount} · <strong>Mov. caja:</strong> ${outflowCount} · <strong>Pagos de deuda:</strong> ${debtPaymentsCount}</p>`;
+  const agg = getClosingAggregates(closing);
   const sales = Array.isArray(closing.salesSnapshot) ? closing.salesSnapshot : state.sales.filter((sale) => (closing.salesIds || []).includes(sale.id));
+  const openAt = new Date(closing.openedAt || closing.fecha_apertura || closing.closedAt);
+  const closeAt = new Date(closing.closedAt);
+  const netIncome = Number(closing.cashIn || 0) + Number(closing.qrIn || 0) + Number(closing.transferIn || 0) + Number(closing.otherIn || 0);
+  const totalDiscounts = Number(closing.discountTotal || 0);
+  const expected = agg.expected;
+  const counted = agg.counted;
+  const diff = counted - expected;
+  const finalStatus = diff === 0 ? 'CUADRADO' : (diff > 0 ? 'SOBRANTE' : 'FALTANTE');
+  if (closingSummaryText) closingSummaryText.innerHTML = `<div class="card"><h4>SECCIÓN 1 – INFORMACIÓN GENERAL</h4><p>Número de cierre: ${String(closing.id || '-').slice(-8)}</p><p>Fecha de apertura: ${openAt.toLocaleDateString()}</p><p>Hora de apertura: ${openAt.toLocaleTimeString()}</p><p>Fecha de cierre: ${closeAt.toLocaleDateString()}</p><p>Hora de cierre: ${closeAt.toLocaleTimeString()}</p><p>Usuario que abrió: ${closing.usuario_apertura || '-'}</p><p>Usuario que cerró: ${closing.usuario_cierre || '-'}</p><p>Tiempo total de caja abierta: ${formatDurationMs(closeAt - openAt)}</p></div><div class="card"><h4>SECCIÓN 2 – RESUMEN FINANCIERO</h4><p>Monto inicial: ${money(closing.openingCash || 0)}</p><p>Total ventas brutas: ${money(netIncome)}</p><p>Total descuentos: ${money(totalDiscounts)}</p><p>Total ingresos netos: ${money(netIncome - totalDiscounts)}</p><p>Total efectivo: ${money(agg.cash)}</p><p>Total transferencias: ${money(agg.transfer)}</p><p>Total QR: ${money(agg.qr)}</p><p>Otros métodos: ${money(agg.others)}</p><p>Total gastos: ${money(agg.outTotal)}</p><p>Total esperado: ${money(expected)}</p><p>Total contado: ${money(counted)}</p><p>Diferencia: ${money(diff)}</p><p><strong>Estado final: ${finalStatus}</strong></p></div><div class="card"><h4>SECCIÓN 3 – MÉTRICAS OPERATIVAS</h4><p>Cantidad total de ventas: ${closing.salesCount || sales.length}</p><p>Total productos vendidos: ${agg.qtyTotal}</p><p>Ticket promedio: ${money(agg.avgTicket)}</p><p>Venta más alta: ${money(agg.saleMax)}</p><p>Venta más baja: ${money(agg.saleMin)}</p><p>Ventas eliminadas: ${deletedCount} · Mov. caja: ${outflowCount} · Pagos deuda: ${debtPaymentsCount}</p></div><div class="card"><h4>SECCIÓN 5 – MÉTODOS DE PAGO</h4><p>Efectivo: ${money(agg.cash)} (${((agg.cash/Math.max(1, agg.net))*100).toFixed(1)}%)</p><p>Transferencia: ${money(agg.transfer)} (${((agg.transfer/Math.max(1, agg.net))*100).toFixed(1)}%)</p><p>QR: ${money(agg.qr)} (${((agg.qr/Math.max(1, agg.net))*100).toFixed(1)}%)</p><p>Otros: ${money(agg.others)} (${((agg.others/Math.max(1, agg.net))*100).toFixed(1)}%)</p></div>`;
   if (closingSalesTable) closingSalesTable.innerHTML = sales.length ? sales.map((sale) => `<tr><td>${new Date(sale.createdAt).toLocaleString()}</td><td>#${orderNumberLabel(sale.orderNumber)}</td><td>${sale.payment}</td><td>${money(sale.total)}</td><td>${sale.user}</td></tr>`).join('') : '<tr><td colspan="5">Sin ventas.</td></tr>';
   if (closingProductsTable) {
-    const productsMap = new Map();
-    sales.forEach((sale) => (sale.items || []).forEach((item) => {
-      const key = item.name;
-      if (!productsMap.has(key)) productsMap.set(key, { qty: 0, total: 0 });
-      const row = productsMap.get(key);
-      row.qty += Number(item.qty || 0);
-      row.total += Number(item.finalSubtotal ?? (item.price * item.qty));
-    }));
-    closingProductsTable.innerHTML = productsMap.size ? [...productsMap.entries()].map(([name, row]) => `<tr><td>${name}</td><td>${row.qty}</td><td>${money(row.total)}</td></tr>`).join('') : '<tr><td colspan="3">Sin productos vendidos.</td></tr>';
+    const aggProducts = agg.products;
+    closingProductsTable.innerHTML = aggProducts.length ? aggProducts.map((row) => `<tr><td>${row.name}</td><td>${row.qty}</td><td>${money(row.total)}</td></tr>`).join('') : '<tr><td colspan="3">Sin productos vendidos.</td></tr>';
+    if (closingSummaryText) {
+      closingSummaryText.innerHTML += `<div class="card"><h4>SECCIÓN 4 – PRODUCTOS VENDIDOS</h4><p>Producto más vendido: ${agg.topByQty ? `${agg.topByQty.name} (${agg.topByQty.qty})` : '-'}</p><p>Producto que más dinero generó: ${agg.topByAmount ? `${agg.topByAmount.name} (${money(agg.topByAmount.total)})` : '-'}</p><p>Total productos distintos vendidos: ${agg.productsDistinct}</p></div>`;
+    }
   }
   if (closingUsersTable) {
     const usersMap = new Map();
@@ -817,6 +1106,101 @@ function renderDebtors() {
 function renderUsers() {
   if (!usersTable) return;
   usersTable.innerHTML = state.users.map((u) => `<tr><td>${u.username}</td><td>${u.permissions?.authorizeCash ? 'Sí' : 'No'}</td><td>${u.permissions?.closeCash ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteSales ? 'Sí' : 'No'}</td><td>${u.permissions?.accessSettings ? 'Sí' : 'No'}</td><td>${u.permissions?.manageProducts ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteClosings ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteCashMovements ? 'Sí' : 'No'}</td><td>${u.permissions?.clearDeletedSalesHistory ? 'Sí' : 'No'}</td><td>${u.permissions?.manageUsers ? 'Sí' : 'No'}</td><td><button class="secondary" data-user-edit="${u.username}" type="button">Editar</button> <button class="secondary" data-user-del="${u.username}" type="button">Eliminar</button></td></tr>`).join('');
+  if (userManagerCard && !document.getElementById('saveUsersChangesBtn')) {
+    const btn = document.createElement('button');
+    btn.id = 'saveUsersChangesBtn';
+    btn.className = 'primary';
+    btn.type = 'button';
+    btn.textContent = 'Guardar cambios';
+    btn.style.marginTop = '0.5rem';
+    userManagerCard.appendChild(btn);
+  }
+  if (userManagerCard && !document.getElementById('usersImportFileInput')) {
+    const input = document.createElement('input');
+    input.id = 'usersImportFileInput';
+    input.type = 'file';
+    input.accept = '.xlsx,.xls';
+    input.className = 'hidden';
+    userManagerCard.appendChild(input);
+  }
+  if (userManagerCard && !document.getElementById('exportUsersBtn')) {
+    const wrap = document.createElement('div');
+    wrap.id = 'usersExcelActions';
+    wrap.className = 'grid3';
+    wrap.style.marginTop = '0.5rem';
+    wrap.innerHTML = '<button id="exportUsersBtn" class="secondary" type="button">Descargar usuarios (XLSX)</button><button id="importUsersBtn" class="secondary" type="button">Subir usuarios (XLSX)</button>';
+    userManagerCard.appendChild(wrap);
+  }
+  const saveUsersBtn = document.getElementById('saveUsersChangesBtn');
+  if (saveUsersBtn) saveUsersBtn.onclick = () => {
+    persist();
+    setMsg(homeMessage, 'Usuarios y permisos guardados correctamente.');
+  };
+  const exportUsersBtn = document.getElementById('exportUsersBtn');
+  if (exportUsersBtn) exportUsersBtn.onclick = exportUsersToExcel;
+  const importUsersBtn = document.getElementById('importUsersBtn');
+  const usersImportFileInput = document.getElementById('usersImportFileInput');
+  if (importUsersBtn && usersImportFileInput) importUsersBtn.onclick = () => usersImportFileInput.click();
+  if (usersImportFileInput) usersImportFileInput.onchange = (e) => {
+    const file = e.target?.files?.[0];
+    importUsersFromExcelFile(file);
+    usersImportFileInput.value = '';
+  };
+}
+
+function exportUsersToExcel() {
+  if (!window.XLSX) return alert('No se pudo cargar la librería XLSX.');
+  const permissionKeys = permissionSchema().map((p) => p.key);
+  const rows = (state.users || []).map((u) => {
+    const row = { Usuario: u.username || '', Contraseña: u.password || '' };
+    permissionKeys.forEach((key) => { row[key] = u.username === 'admin' ? 1 : (u.permissions?.[key] ? 1 : 0); });
+    return row;
+  });
+  const ws = XLSX.utils.json_to_sheet(rows, { header: ['Usuario', 'Contraseña', ...permissionKeys] });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'USUARIOS');
+  XLSX.writeFile(wb, 'usuarios_sistema.xlsx');
+}
+
+function importUsersFromExcelFile(file) {
+  if (!window.XLSX || !file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const wb = XLSX.read(reader.result, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (!rows.length) return alert('El archivo no contiene filas válidas.');
+      const permissionKeys = permissionSchema().map((p) => p.key);
+      const usersMap = new Map((state.users || []).map((u) => [String(u.username || '').trim().toLowerCase(), u]));
+      rows.forEach((row) => {
+        const username = String(row.Usuario || '').trim();
+        if (!username) return;
+        const password = String(row.Contraseña || '').trim();
+        const key = username.toLowerCase();
+        const existing = usersMap.get(key);
+        const base = existing || { username, password: password || '1234', permissions: defaultPermissions(), createdBy: state.currentUser?.username || 'admin' };
+        base.username = username;
+        if (password) base.password = password;
+        if (!base.permissions) base.permissions = defaultPermissions();
+        permissionKeys.forEach((perm) => {
+          const val = row[perm];
+          base.permissions[perm] = String(val).trim() === '1' || String(val).toLowerCase() === 'true';
+        });
+        if (username === 'admin') base.permissions = defaultPermissions();
+        usersMap.set(key, base);
+      });
+      state.users = [...usersMap.values()];
+      ensureUsers();
+      persist();
+      renderUsers();
+      alert('Usuarios importados correctamente.');
+    } catch (error) {
+      console.error('[users] import error', error);
+      alert('No se pudo importar el archivo de usuarios.');
+    }
+  };
+  reader.readAsArrayBuffer(file);
 }
 
 function normalizeProductName(value) {
@@ -1155,7 +1539,7 @@ function renderSalesHistory() {
   const searchOrder = (salesOrderSearchInput?.value || '').trim();
   if (userFilter) list = list.filter((s) => s.user === userFilter);
   if (searchOrder) list = list.filter((s) => String(s.orderNumber || '').includes(searchOrder));
-  salesTable.innerHTML = list.length ? list.map((sale) => `<tr><td>#${orderNumberLabel(sale.orderNumber)}</td><td>${new Date(sale.createdAt).toLocaleString()}</td><td>${money(sale.total)}</td><td>${sale.payment}</td><td><button type="button" class="secondary" data-sale-act="view" data-sale-id="${sale.id}">Ver Venta</button>${isAdminUser() ? ` <button type="button" class="secondary" data-sale-act="edit" data-sale-id="${sale.id}">Editar venta</button> <button type="button" class="secondary" data-sale-act="del" data-sale-id="${sale.id}">Eliminar venta</button>` : ''}</td><td>${sale.user}</td></tr>`).join('') : '<tr><td colspan="6">Sin ventas.</td></tr>';
+  salesTable.innerHTML = list.length ? list.map((sale) => `<tr><td>#${orderNumberLabel(sale.orderNumber)}</td><td>${new Date(sale.createdAt).toLocaleString()}</td><td>${money(sale.total)}</td><td>${sale.payment}</td><td><button type="button" class="secondary" data-sale-act="view" data-sale-id="${sale.id}">Ver Venta</button>${hasPermission('deleteSales') ? ` <button type="button" class="secondary" data-sale-act="edit" data-sale-id="${sale.id}">Editar venta</button> <button type="button" class="secondary" data-sale-act="del" data-sale-id="${sale.id}">Eliminar venta</button>` : ''}</td><td>${sale.user}</td></tr>`).join('') : '<tr><td colspan="6">Sin ventas.</td></tr>';
 }
 
 
@@ -1201,7 +1585,7 @@ function openSaleEditModal(sale) {
   if (pay) pay.value = sale.payment;
   document.getElementById('cancelEditSaleBtn')?.addEventListener('click', () => overlay.remove());
   document.getElementById('saveEditSaleBtn')?.addEventListener('click', () => {
-    if (!isAdminUser()) { alert('Solo admin puede editar ventas.'); return; }
+    if (!hasPermission('deleteSales')) { alert('No tienes permiso para editar ventas.'); return; }
     sale.payment = document.getElementById('editSalePayment')?.value || sale.payment;
     const pid = document.getElementById('editSaleProduct')?.value || '';
     const qty = Math.max(1, Number(document.getElementById('editSaleQty')?.value || 1));
@@ -1385,15 +1769,13 @@ async function pullFromCloud() {
     saveLocalState();
     renderOrdersVisibility();
     renderProducts(); renderOrders(false); renderSalesHistory(); renderDeletedSales(); renderDebtors(); renderSummary(); renderCashStatus(); renderHomeActions();
-    if (state.currentUser) {
-      if (getActiveCashBox() && !posScreen?.classList.contains('hidden')) {
-        renderOrders(false);
-      } else if (getActiveCashBox() && posScreen?.classList.contains('hidden')) {
-        switchToPos('ventas');
-      } else {
-        maybeForceLogoutFromClosure();
-      }
+    const currentRoute = normalizeRoute(window.location.hash || '#home');
+    const inSettingsBranch = currentRoute === 'settings' || currentRoute.startsWith('settings/');
+    const inPosBranch = currentRoute.startsWith('pos/') || currentRoute === 'cash/closings';
+    if (state.currentUser && !getActiveCashBox() && !inSettingsBranch && !inPosBranch) {
+      maybeForceLogoutFromClosure();
     }
+    applyRoute();
   } catch {}
 }
 
@@ -1877,37 +2259,16 @@ function parentRoute(route) {
 }
 
 function ensureGlobalNavButtons() {
-  let backBtn = document.getElementById('globalBackBtn');
-  if (!backBtn) {
-    backBtn = document.createElement('button');
-    backBtn.id = 'globalBackBtn';
-    backBtn.type = 'button';
-    backBtn.className = 'secondary hidden';
-    backBtn.textContent = 'Volver atrás';
-    backBtn.style.position = 'fixed';
-    backBtn.style.top = '12px';
-    backBtn.style.left = '12px';
-    backBtn.style.zIndex = '1200';
-    backBtn.addEventListener('click', () => {
-      const current = navStack[navStack.length - 1] || 'home';
-      if (current === 'home') return;
-      navigateTo(parentRoute(current), { replace: true });
-    });
-    document.body.appendChild(backBtn);
+  let navWrap = document.getElementById('globalTopNavigation');
+  if (!navWrap) {
+    navWrap = document.createElement('div');
+    navWrap.id = 'globalTopNavigation';
+    navWrap.className = 'top-navigation hidden';
+    navWrap.innerHTML = '<button id="globalBackBtn" class="secondary" type="button">Volver atrás</button><button id="globalHomeBtn" class="secondary" type="button">Volver a inicio</button>';
+    document.body.appendChild(navWrap);
   }
-  let homeBtn = document.getElementById('globalHomeBtn');
-  if (!homeBtn) {
-    homeBtn = document.createElement('button');
-    homeBtn.id = 'globalHomeBtn';
-    homeBtn.type = 'button';
-    homeBtn.className = 'secondary hidden';
-    homeBtn.textContent = 'Volver a inicio';
-    homeBtn.style.position = 'fixed';
-    homeBtn.style.top = '12px';
-    homeBtn.style.left = '140px';
-    homeBtn.style.zIndex = '1200';
-    document.body.appendChild(homeBtn);
-  }
+  const backBtn = navWrap.querySelector('#globalBackBtn');
+  const homeBtn = navWrap.querySelector('#globalHomeBtn');
   backBtn.onclick = () => {
     const current = normalizeRoute(window.location.hash || '#home');
     if (current === 'home') return;
@@ -1917,7 +2278,10 @@ function ensureGlobalNavButtons() {
     navStack = ['home'];
     navigateTo('home', { replace: true });
   };
-  return { backBtn, homeBtn };
+  const showNav = Boolean(state.currentUser);
+  navWrap.classList.toggle('hidden', !showNav);
+  document.body.classList.toggle('with-top-navigation', showNav);
+  return { navWrap, backBtn, homeBtn };
 }
 
 function showOnlyHomeSections(selectorList = []) {
@@ -1934,28 +2298,53 @@ function hideAllScreens() {
   homeScreen?.classList.remove('settings-mode');
 }
 
+function enforceSingleActiveView(route = normalizeRoute(window.location.hash || '#home')) {
+  const activeScreens = [loginScreen, homeScreen, posScreen, stockScreen].filter((el) => el && !el.classList.contains('hidden'));
+  if (activeScreens.length > 1) {
+    console.warn('[nav] múltiples vistas activas detectadas, corrigiendo', activeScreens.map((el) => el.id));
+    hideAllScreens();
+    if (route === 'home') homeScreen?.classList.remove('hidden');
+    else if (route === 'stock') stockScreen?.classList.remove('hidden');
+    else if (route.startsWith('pos/') || route === 'cash/closings') posScreen?.classList.remove('hidden');
+    else if (route.startsWith('settings')) {
+      homeScreen?.classList.remove('hidden');
+      homeScreen?.classList.add('settings-mode');
+      settingsCard?.classList.remove('hidden');
+    } else loginScreen?.classList.remove('hidden');
+  }
+}
+
+function ensureSettingsNavButtons() {
+  const old = settingsCard?.querySelector('#settingsLocalNav');
+  old?.remove();
+  ensureGlobalNavButtons();
+}
+
 function renderRoute(route) {
   if (!state.currentUser) return showLogin();
-  if (route === 'home') { showHome(); return; }
-  if (route === 'stock') { showStockPage(); return; }
+  if (route === 'home') { showHome(); enforceSingleActiveView(route); return; }
+  if (route === 'stock') { showStockPage(); enforceSingleActiveView(route); return; }
   if (route === 'settings') {
     hideAllScreens();
     homeScreen?.classList.remove('hidden');
     homeScreen?.classList.add('settings-mode');
     showOnlyHomeSections(['#settingsCard']);
     settingsCard?.classList.remove('hidden');
+    ensureSettingsNavButtons();
     showSettingsMenu();
+    enforceSingleActiveView(route);
     return;
   }
-  if (route === 'settings/main') { renderRoute('settings'); showSettingsView(mainConfigCard); return; }
-  if (route === 'settings/sales') { renderRoute('settings'); syncTempConfigFromApp(); showSettingsView(salesConfigCard); return; }
-  if (route === 'settings/users') { renderRoute('settings'); renderUsers(); showSettingsView(userManagerCard); closeUserFormView(); return; }
-  if (route === 'settings/users/new') { renderRoute('settings/users'); openUserFormView(); return; }
+  if (route === 'settings/main') { renderRoute('settings'); showSettingsView(mainConfigCard); enforceSingleActiveView(route); return; }
+  if (route === 'settings/sales') { renderRoute('settings'); syncTempConfigFromApp(); showSettingsView(salesConfigCard); enforceSingleActiveView(route); return; }
+  if (route === 'settings/users') { renderRoute('settings'); renderUsers(); showSettingsView(userManagerCard); closeUserFormView(); enforceSingleActiveView(route); return; }
+  if (route === 'settings/users/new') { renderRoute('settings/users'); openUserFormView(); enforceSingleActiveView(route); return; }
   if (route.startsWith('settings/users/edit/')) {
     renderRoute('settings/users');
     const u = decodeURIComponent(route.split('settings/users/edit/')[1] || '');
     const user = state.users.find((x) => x.username === u);
     if (user) openUserFormView(user);
+    enforceSingleActiveView(route);
     return;
   }
   if (route === 'cash/closings') { switchToPos('cierres'); return; }
@@ -1970,26 +2359,26 @@ function renderRoute(route) {
   if (route === 'pos/productos') { switchToPos('productos'); hideProductSubviews(); return; }
   if (route === 'pos/productos-lista') { switchToPos('productos'); openProductListView(); return; }
   if (route === 'pos/productos-categorias') { switchToPos('productos'); hideProductSubviews(); manageCategoriesCard?.classList.remove('hidden'); return; }
-  if (route === 'pos/productos-combo') { switchToPos('productos'); hideProductSubviews(); createComboCard?.classList.remove('hidden'); if (createComboBtn) createComboBtn.classList.add('hidden'); if (comboProductsSelect) comboProductsSelect.classList.add('hidden'); openComboCreatorModal(); return; }
+  if (route === 'pos/productos-combo') { switchToPos('productos'); hideProductSubviews(); createComboCard?.classList.remove('hidden'); if (createComboBtn) createComboBtn.classList.add('hidden'); if (comboProductsSelect) comboProductsSelect.classList.add('hidden'); openComboCreatorModal(); enforceSingleActiveView(route); return; }
   showHome();
+  enforceSingleActiveView(route);
 }
 
 function applyRoute() {
   const route = normalizeRoute(window.location.hash);
   if (!state.currentUser) return showLogin();
-  const nav = ensureGlobalNavButtons();
-  nav.backBtn.classList.toggle('hidden', route === 'home');
-  nav.homeBtn.classList.toggle('hidden', route === 'home');
+  ensureGlobalNavButtons();
   if (!applyingRoute) {
     const current = navStack[navStack.length - 1] || 'home';
     if (current !== route) navStack.push(route);
   }
   renderRoute(route);
+  enforceSingleActiveView(route);
 }
 
 function navigateTo(route, opts = {}) {
   const next = normalizeRoute(route);
-  const nav = ensureGlobalNavButtons();
+  ensureGlobalNavButtons();
   const current = navStack[navStack.length - 1] || 'home';
   if (opts.replace) {
     const parent = parentRoute(current);
@@ -2000,9 +2389,8 @@ function navigateTo(route, opts = {}) {
   applyingRoute = true;
   window.location.hash = `#${next}`;
   applyingRoute = false;
-  nav.backBtn.classList.toggle('hidden', next === 'home');
-  nav.homeBtn.classList.toggle('hidden', next === 'home');
   renderRoute(next);
+  enforceSingleActiveView(next);
 }
 
 function showSettingsMenu() {
@@ -2476,12 +2864,12 @@ function wireEvents() {
       return;
     }
     if (b.dataset.saleAct === 'edit') {
-      if (!isAdminUser()) return alert('Solo admin puede editar ventas.');
+      if (!hasPermission('deleteSales')) return alert('No tienes permiso para editar ventas.');
       openSaleEditModal(sale);
       return;
     }
     if (b.dataset.saleAct === 'del') {
-      if (!isAdminUser()) return alert('Solo admin puede eliminar ventas.');
+      if (!hasPermission('deleteSales')) return alert('No tienes permiso para eliminar ventas.');
       state.deletedSales.unshift({ ...sale, deletedAt: new Date().toISOString(), deletedBy: state.currentUser?.username || '-' });
       if (isStockEnabled()) {
         (sale.items || []).forEach((it) => {
@@ -2620,9 +3008,36 @@ function wireEvents() {
       renderCashClosings();
       return;
     }
+    const pdf = e.target.closest('button[data-closing-pdf]');
+    if (pdf) {
+      downloadClosingPdf(pdf.dataset.closingPdf);
+      return;
+    }
     const b = e.target.closest('button[data-closing-id]');
     if (!b) return;
     renderClosingDetails(b.dataset.closingId);
+  });
+  document.addEventListener('click', (e) => {
+    const sel = e.target.closest('#selectClosingsBtn');
+    if (sel) {
+      openSelectClosingsModal();
+      return;
+    }
+    const gen = e.target.closest('#generateClosingsStatsBtn');
+    if (gen) {
+      const selected = activeClosingsList().filter((c) => state.selectedClosingIds.includes(c.id));
+      if (!selected.length) return alert('Debe seleccionar al menos un cierre');
+      state.generatedClosingsStats = buildStatsFromSelectedClosings();
+      renderClosingsStatsOutput(state.generatedClosingsStats);
+      const pdfBtn = document.getElementById('downloadClosingsStatsPdfBtn');
+      if (pdfBtn) pdfBtn.disabled = false;
+      return;
+    }
+    const pdfStats = e.target.closest('#downloadClosingsStatsPdfBtn');
+    if (pdfStats) {
+      downloadClosingsStatsPdf();
+      return;
+    }
   });
 }
 

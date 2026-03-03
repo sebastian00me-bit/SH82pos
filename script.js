@@ -6,7 +6,7 @@ const state = {
   cashSession: JSON.parse(localStorage.getItem('cafeteria_cash_session') || 'null'),
   users: JSON.parse(localStorage.getItem('cafeteria_users') || '[]'),
   currentUser: JSON.parse(localStorage.getItem('cafeteria_current_user') || 'null'),
-  settings: JSON.parse(localStorage.getItem('cafeteria_settings') || '{"title1":"Mi Cafetería","title2":"Pantalla principal","posTitle":"POS Cafetería","posSubtitle":"Ventas, productos, deudas, cierres y resumen diario.","logoDataUrl":"","accentColor":"#1f7a5c","bgColor":"#f7f7fb","cardColor":"#ffffff","logoSize":120,"title1Size":32,"title2Size":16,"title1Font":"Inter, system-ui, sans-serif","title2Font":"Inter, system-ui, sans-serif","ordersEnabled":true}'),
+  settings: JSON.parse(localStorage.getItem('cafeteria_settings') || '{"title1":"Mi Cafetería","title2":"Pantalla principal","posTitle":"POS Cafetería","posSubtitle":"Ventas, productos, deudas, cierres y resumen diario.","logoDataUrl":"","accentColor":"#1f7a5c","bgColor":"#f7f7fb","cardColor":"#ffffff","logoSize":120,"title1Size":32,"title2Size":16,"title1Font":"Inter, system-ui, sans-serif","title2Font":"Inter, system-ui, sans-serif","title1Color":"#1d2530","title2Color":"#6f7a86","ordersEnabled":true}'),
   categories: JSON.parse(localStorage.getItem('cafeteria_categories') || '[]'),
   people: JSON.parse(localStorage.getItem('cafeteria_people') || '[]'),
   stockConfig: JSON.parse(localStorage.getItem('cafeteria_stock_config') || '{"enabled":false,"min":0}')
@@ -56,6 +56,8 @@ const title1SizeInput = $('title1SizeInput');
 const title2SizeInput = $('title2SizeInput');
 const title1FontInput = $('title1FontInput');
 const title2FontInput = $('title2FontInput');
+const title1ColorInput = $('title1ColorInput');
+const title2ColorInput = $('title2ColorInput');
 const accentColorInput = $('accentColorInput');
 const bgColorInput = $('bgColorInput');
 const cardColorInput = $('cardColorInput');
@@ -280,6 +282,8 @@ let appConfig = {
   stockMinimo: Number(state.stockConfig?.min || 0)
 };
 
+let cloudPullInFlight = null;
+
 function syncAppConfig() {
   appConfig = {
     stockActivo: Boolean(state.stockConfig?.enabled),
@@ -367,9 +371,9 @@ function saveLocalState() {
   localStorage.setItem('cafeteria_debt_payments', JSON.stringify(state.debtPayments));
 }
 
-function persist() {
-  state.lastSyncAt = Date.now();
+function persist(options = {}) {
   saveLocalState();
+  if (options.sync === false) return;
   Promise.resolve().then(syncToCloud);
 }
 
@@ -625,6 +629,8 @@ function applySettings() {
     homeSubtitle.style.fontSize = `${Number(state.settings.title2Size || 16)}px`;
     homeSubtitle.style.fontFamily = state.settings.title2Font || 'Inter, system-ui, sans-serif';
   }
+  if (businessName) businessName.style.color = state.settings.title1Color || '#1d2530';
+  if (homeSubtitle) homeSubtitle.style.color = state.settings.title2Color || '#6f7a86';
   if (homeLogo && state.settings.logoSize) homeLogo.style.width = `${Number(state.settings.logoSize || 120)}px`;
   if (title1Input) title1Input.value = state.settings.title1 || '';
   if (title2Input) title2Input.value = state.settings.title2 || '';
@@ -635,6 +641,8 @@ function applySettings() {
   if (title2SizeInput) title2SizeInput.value = String(Number(state.settings.title2Size || 16));
   if (title1FontInput) title1FontInput.value = state.settings.title1Font || 'Inter, system-ui, sans-serif';
   if (title2FontInput) title2FontInput.value = state.settings.title2Font || 'Inter, system-ui, sans-serif';
+  if (title1ColorInput) title1ColorInput.value = state.settings.title1Color || '#1d2530';
+  if (title2ColorInput) title2ColorInput.value = state.settings.title2Color || '#6f7a86';
   if (accentColorInput) accentColorInput.value = state.settings.accentColor || '#1f7a5c';
   if (bgColorInput) bgColorInput.value = state.settings.bgColor || '#f7f7fb';
   if (cardColorInput) cardColorInput.value = state.settings.cardColor || '#ffffff';
@@ -1751,21 +1759,48 @@ async function syncToCloud() {
   try {
     const token = state.settings.firebaseDbToken ? `?auth=${encodeURIComponent(state.settings.firebaseDbToken)}` : '';
     const url = `${state.settings.firebaseDbUrl.replace(/\/$/, '')}/${state.settings.firebaseDbPath || SHARED_DB_PATH}.json${token}`;
-    await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snapshotPayload()) });
+    const remoteResp = await fetch(url, { headers: { 'X-Firebase-ETag': 'true' } });
+    const remoteData = await remoteResp.json();
+    const remoteEtag = remoteResp.headers.get('ETag');
+    const remoteUpdatedAt = Number(remoteData?.updatedAt || 0);
+    if (remoteUpdatedAt && remoteUpdatedAt > Number(state.lastSyncAt || 0)) {
+      await pullFromCloud({ force: true });
+      if (syncStatus) syncStatus.textContent = 'Sincronización remota más reciente detectada. Estado actualizado sin sobrescribir.';
+      return;
+    }
+
+    const payload = snapshotPayload();
+    if (remoteUpdatedAt && Number(payload.updatedAt || 0) <= remoteUpdatedAt) payload.updatedAt = remoteUpdatedAt + 1;
+    const putHeaders = { 'Content-Type': 'application/json' };
+    if (remoteEtag) putHeaders['if-match'] = remoteEtag;
+    const putResp = await fetch(url, { method: 'PUT', headers: putHeaders, body: JSON.stringify(payload) });
+    if (putResp.status === 412) {
+      await pullFromCloud({ force: true });
+      if (syncStatus) syncStatus.textContent = 'Conflicto detectado. Se actualizó estado remoto sin sobrescribir.';
+      return;
+    }
+    if (!putResp.ok) throw new Error(`sync put failed: ${putResp.status}`);
+    state.lastSyncAt = Number(payload.updatedAt || Date.now());
+    saveLocalState();
     if (syncStatus) syncStatus.textContent = 'Sincronización enviada.';
   } catch {
     if (syncStatus) syncStatus.textContent = 'Error de sincronización.';
   }
 }
 
-async function pullFromCloud() {
+async function pullFromCloud(options = {}) {
   if (!state.settings.firebaseDbUrl) return;
+  if (cloudPullInFlight) return cloudPullInFlight;
+  cloudPullInFlight = (async () => {
   try {
     const token = state.settings.firebaseDbToken ? `?auth=${encodeURIComponent(state.settings.firebaseDbToken)}` : '';
     const url = `${state.settings.firebaseDbUrl.replace(/\/$/, '')}/${state.settings.firebaseDbPath || SHARED_DB_PATH}.json${token}`;
     const r = await fetch(url);
     const data = await r.json();
-    if (!data || !data.updatedAt || data.updatedAt <= state.lastSyncAt) return;
+    if (!data || !data.updatedAt) return;
+    if (!options.force && data.updatedAt <= state.lastSyncAt) {
+      return;
+    }
     state.lastSyncAt = Number(data.updatedAt || Date.now());
     state.forceLogoutAt = Number(data.forceLogoutAt || 0);
     ['products','sales','deletedSales','cashClosings','cashSession','users','settings','categories','people','stockConfig','outflows','debtPayments','cashBoxes','activeCashBoxId','systemStatus'].forEach((k) => {
@@ -1786,6 +1821,11 @@ async function pullFromCloud() {
     }
     applyRoute();
   } catch {}
+  finally {
+    cloudPullInFlight = null;
+  }
+  })();
+  return cloudPullInFlight;
 }
 
 function renderHomeActions() {
@@ -1930,7 +1970,8 @@ function openStartCashModal() {
   });
 }
 
-function startCashSession(openingAmount = 0) {
+async function startCashSession(openingAmount = 0) {
+  await pullFromCloud({ force: true });
   console.info('[cash] startCashSession()', { openingAmount, user: state.currentUser?.username || '-' });
   if (!canStartOrCloseCash()) {
     console.warn('[cash] bloqueo por permisos');
@@ -2421,6 +2462,8 @@ function saveMainSettings() {
   state.settings.title2Size = Math.max(12, Number(title2SizeInput?.value || 16));
   state.settings.title1Font = title1FontInput?.value || 'Inter, system-ui, sans-serif';
   state.settings.title2Font = title2FontInput?.value || 'Inter, system-ui, sans-serif';
+  state.settings.title1Color = title1ColorInput?.value || '#1d2530';
+  state.settings.title2Color = title2ColorInput?.value || '#6f7a86';
   state.settings.accentColor = accentColorInput?.value || '#1f7a5c';
   state.settings.bgColor = bgColorInput?.value || '#f7f7fb';
   state.settings.cardColor = cardColorInput?.value || '#ffffff';
@@ -3050,14 +3093,15 @@ function wireEvents() {
   });
 }
 
-function bootstrap() {
+async function bootstrap() {
+  normalizeCloudSettings();
+  await pullFromCloud({ force: true });
   ensureUsers();
   ensureSeedData();
   ensureProductStockDefaults();
   ensurePeopleData();
   normalizeCashState();
   syncAppConfig();
-  normalizeCloudSettings();
   saveLocalState();
   applySettings();
   wireEvents();
@@ -3086,7 +3130,7 @@ function bootstrap() {
     if (!getActiveCashBox()) setMsg(homeMessage, 'La caja está cerrada. Espera a que un usuario autorizado la abra.', false);
   } else {
     state.currentUser = null;
-    persist();
+    persist({ sync: false });
     showLogin();
   }
 }

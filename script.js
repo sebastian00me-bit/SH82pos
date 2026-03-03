@@ -13,6 +13,7 @@ const state = {
 };
 
 let sessionWatchInterval = null;
+const SESSION_INACTIVITY_LIMIT_MS = 6 * 60 * 60 * 1000;
 
 const $ = (id) => document.getElementById(id);
 const loginScreen = $('loginScreen');
@@ -398,6 +399,7 @@ function saveLocalState() {
 }
 
 function persist(options = {}) {
+  if (state.currentUser && !validateSessionPolicy({ silent: false })) return;
   saveLocalState();
   if (options.sync === false) return;
   Promise.resolve().then(syncToCloud);
@@ -409,14 +411,17 @@ function defaultPermissions() {
 
 function ensureUsers() {
   if (!Array.isArray(state.users) || state.users.length === 0) {
-    state.users = [{ username: 'admin', password: '5432', permissions: defaultPermissions(), createdBy: 'admin' }];
+    state.users = [{ username: 'admin', password: '5432', permissions: defaultPermissions(), createdBy: 'admin', enabled: true, lastActivityAt: Date.now(), lastLogoutAt: 0 }];
   }
   if (!state.users.find((u) => u.username === 'admin')) {
-    state.users.push({ username: 'admin', password: '5432', permissions: defaultPermissions(), createdBy: 'admin' });
+    state.users.push({ username: 'admin', password: '5432', permissions: defaultPermissions(), createdBy: 'admin', enabled: true, lastActivityAt: Date.now(), lastLogoutAt: 0 });
   }
   state.users = state.users.map((u) => ({
     ...u,
-    permissions: { ...defaultPermissions(), ...(u.permissions || {}) }
+    permissions: { ...defaultPermissions(), ...(u.permissions || {}) },
+    enabled: u.enabled !== false,
+    lastActivityAt: Number(u.lastActivityAt || 0),
+    lastLogoutAt: Number(u.lastLogoutAt || 0)
   }));
 }
 
@@ -464,17 +469,69 @@ function salesForActiveCashBox() {
 }
 
 function isSessionExpired() {
-  return false;
+  const user = currentUserRecord();
+  if (!state.currentUser || !user) return false;
+  if (user.enabled === false) return true;
+  const ref = Number(user.lastActivityAt || state.currentUser.lastActivityAt || state.currentUser.loginAt || 0);
+  if (!ref) return false;
+  return (Date.now() - ref) >= SESSION_INACTIVITY_LIMIT_MS;
+}
+
+function markUserActivity(reason = 'actividad') {
+  if (!state.currentUser) return;
+  const now = Date.now();
+  state.currentUser.lastActivityAt = now;
+  const user = currentUserRecord();
+  if (user) user.lastActivityAt = now;
+  saveLocalState();
 }
 
 function touchSessionActivity() {
   if (!state.currentUser) return;
-  state.currentUser.lastActivityAt = Date.now();
-  saveLocalState();
+  validateSessionPolicy({ silent: true });
+}
+
+function humanElapsed(ts) {
+  const ms = Math.max(0, Date.now() - Number(ts || 0));
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return 'Hace menos de 1 minuto';
+  if (m < 60) return `Hace ${m} minuto${m === 1 ? '' : 's'}`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `Hace ${h} hora${h === 1 ? '' : 's'}`;
+  const d = Math.floor(h / 24);
+  return `Hace ${d} día${d === 1 ? '' : 's'}`;
+}
+
+function validateSessionPolicy({ silent = false } = {}) {
+  if (!state.currentUser) return true;
+  const user = currentUserRecord();
+  if (!user) {
+    logout('Sesión inválida. Vuelve a iniciar sesión.');
+    return false;
+  }
+  if (user.enabled === false) {
+    user.lastLogoutAt = Date.now();
+    saveLocalState();
+    logout('Usuario inhabilitado por administrador.');
+    return false;
+  }
+  const last = Number(user.lastActivityAt || state.currentUser.lastActivityAt || state.currentUser.loginAt || 0);
+  if (last && (Date.now() - last) >= SESSION_INACTIVITY_LIMIT_MS) {
+    user.lastLogoutAt = Date.now();
+    saveLocalState();
+    logout('Sesión expirada por inactividad (6 horas).');
+    return false;
+  }
+  if (!silent) markUserActivity('request');
+  return true;
 }
 
 function beginSessionWatcher() {
   if (sessionWatchInterval) clearInterval(sessionWatchInterval);
+  sessionWatchInterval = setInterval(() => {
+    if (!state.currentUser) return;
+    validateSessionPolicy({ silent: true });
+  }, 60 * 1000);
 }
 
 function normalizeCashState() {
@@ -1181,7 +1238,20 @@ function renderDebtors() {
 
 function renderUsers() {
   if (!usersTable) return;
-  usersTable.innerHTML = state.users.map((u) => `<tr><td>${u.username}</td><td>${u.permissions?.authorizeCash ? 'Sí' : 'No'}</td><td>${u.permissions?.closeCash ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteSales ? 'Sí' : 'No'}</td><td>${u.permissions?.accessSettings ? 'Sí' : 'No'}</td><td>${u.permissions?.manageProducts ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteClosings ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteCashMovements ? 'Sí' : 'No'}</td><td>${u.permissions?.clearDeletedSalesHistory ? 'Sí' : 'No'}</td><td>${u.permissions?.manageUsers ? 'Sí' : 'No'}</td><td><button class="secondary" data-user-edit="${u.username}" type="button">Editar</button> <button class="secondary" data-user-del="${u.username}" type="button">Eliminar</button></td></tr>`).join('');
+  document.getElementById('backFromUsersActivityBtn')?.remove();
+  const head = usersTable.closest('table')?.querySelector('thead tr');
+  if (head) head.innerHTML = '<th>Usuario</th><th>Autoriza</th><th>Cerrar caja</th><th>Eliminar ventas</th><th>Config. principal</th><th>Productos</th><th>Eliminar cierres</th><th>Eliminar mov. caja</th><th>Vaciar eliminadas</th><th>Gestionar usuarios</th><th>Acción</th>';
+  usersTable.innerHTML = state.users.map((u) => `<tr><td>${u.username}</td><td>${u.permissions?.authorizeCash ? 'Sí' : 'No'}</td><td>${u.permissions?.closeCash ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteSales ? 'Sí' : 'No'}</td><td>${u.permissions?.accessSettings ? 'Sí' : 'No'}</td><td>${u.permissions?.manageProducts ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteClosings ? 'Sí' : 'No'}</td><td>${u.permissions?.deleteCashMovements ? 'Sí' : 'No'}</td><td>${u.permissions?.clearDeletedSalesHistory ? 'Sí' : 'No'}</td><td>${u.permissions?.manageUsers ? 'Sí' : 'No'}</td><td><button class="secondary" data-user-edit="${u.username}" type="button">Editar</button> <button class="secondary" data-user-del="${u.username}" type="button">Eliminar</button> <button class="secondary" data-user-toggle-enabled="${u.username}" type="button">${u.enabled === false ? 'Habilitar' : 'Inhabilitar'}</button></td></tr>`).join('');
+  if (userManagerCard && !document.getElementById('openUsersActivityBtn')) {
+    const btn = document.createElement('button');
+    btn.id = 'openUsersActivityBtn';
+    btn.className = 'secondary';
+    btn.type = 'button';
+    btn.textContent = 'Actividad de Usuarios';
+    btn.style.marginLeft = '0.5rem';
+    userManagerCard.querySelector('.app-toolbar')?.appendChild(btn);
+    btn.addEventListener('click', () => navigateTo('settings/users/activity'));
+  }
   if (userManagerCard && !document.getElementById('saveUsersChangesBtn')) {
     const btn = document.createElement('button');
     btn.id = 'saveUsersChangesBtn';
@@ -1222,6 +1292,32 @@ function renderUsers() {
     importUsersFromExcelFile(file);
     usersImportFileInput.value = '';
   };
+}
+
+function renderUsersActivityView() {
+  if (!userManagerCard || !usersTable) return;
+  const table = usersTable.closest('table');
+  if (!table) return;
+  table.classList.remove('hidden');
+  toggleUserFormBtn?.classList.add('hidden');
+  const now = Date.now();
+  table.querySelector('thead tr').innerHTML = '<th>Usuario</th><th>Estado</th><th>Última actividad</th><th>Tiempo transcurrido</th>';
+  usersTable.innerHTML = (state.users || []).map((u) => {
+    const last = Number(u.lastActivityAt || 0);
+    const active = u.enabled !== false && last && (now - last) < SESSION_INACTIVITY_LIMIT_MS;
+    const stateText = active ? '🟢 Activo' : '🔴 Inactivo';
+    return `<tr><td>${u.username}</td><td>${stateText}</td><td>${last ? new Date(last).toLocaleString() : '-'}</td><td>${last ? humanElapsed(last) : 'Sin actividad'}</td></tr>`;
+  }).join('') || '<tr><td colspan="4">Sin usuarios.</td></tr>';
+  if (!document.getElementById('backFromUsersActivityBtn')) {
+    const backBtn = document.createElement('button');
+    backBtn.id = 'backFromUsersActivityBtn';
+    backBtn.className = 'secondary';
+    backBtn.type = 'button';
+    backBtn.textContent = 'Volver a gestión de usuarios';
+    backBtn.style.marginBottom = '0.5rem';
+    table.insertAdjacentElement('beforebegin', backBtn);
+    backBtn.addEventListener('click', () => navigateTo('settings/users', { replace: true }));
+  }
 }
 
 function exportUsersToExcel() {
@@ -2134,7 +2230,9 @@ async function handleLogin() {
   if (!username || !password) return setMsg(loginMessage, 'Ingresa usuario y contraseña para continuar.', false);
   const user = state.users.find((u) => u.username === username && u.password === password);
   if (!user) return setMsg(loginMessage, 'Usuario o contraseña incorrectos.', false);
+  if (user.enabled === false) return setMsg(loginMessage, 'Usuario inhabilitado por administrador.', false);
   const now = Date.now();
+  user.lastActivityAt = now;
   state.currentUser = { username: user.username, loginAt: now, lastActivityAt: now };
   saveLocalState();
   beginSessionWatcher();
@@ -2152,6 +2250,8 @@ async function handleLogin() {
 }
 
 function logout(message = '') {
+  const u = currentUserRecord();
+  if (u) u.lastLogoutAt = Date.now();
   state.currentUser = null;
   persist();
   showLogin();
@@ -2543,8 +2643,9 @@ function normalizeRoute(routeLike) {
 function parentRoute(route) {
   if (route === 'home') return 'home';
   if (route === 'settings') return 'home';
-  if (route in { 'settings/main':1, 'settings/sales':1, 'settings/users':1, 'stock':1, 'warehouse':1, 'pos/ventas':1, 'pos/pedidos':1, 'pos/configVentas':1, 'pos/deudas':1, 'pos/resumen':1, 'cash/closings':1 }) return route.startsWith('settings/') ? 'settings' : 'home';
+  if (route in { 'settings/main':1, 'settings/sales':1, 'settings/users':1, 'settings/users/activity':1, 'stock':1, 'warehouse':1, 'pos/ventas':1, 'pos/pedidos':1, 'pos/configVentas':1, 'pos/deudas':1, 'pos/resumen':1, 'cash/closings':1 }) return route.startsWith('settings/') ? 'settings' : 'home';
   if (route.startsWith('settings/users/edit/') || route === 'settings/users/new') return 'settings/users';
+  if (route === 'settings/users/activity') return 'settings/users';
   if (route === 'pos/productos') return 'settings';
   if (route in { 'pos/productos-lista':1, 'pos/productos-categorias':1, 'pos/productos-combo':1 }) return 'pos/productos';
   if (route in { 'pos/historial':1, 'pos/eliminadas':1, 'pos/salidas':1 }) return 'pos/configVentas';
@@ -2634,6 +2735,7 @@ function renderRoute(route) {
   if (route === 'settings/main') { renderRoute('settings'); showSettingsView(mainConfigCard); enforceSingleActiveView(route); return; }
   if (route === 'settings/sales') { renderRoute('settings'); syncTempConfigFromApp(); showSettingsView(salesConfigCard); enforceSingleActiveView(route); return; }
   if (route === 'settings/users') { renderRoute('settings'); renderUsers(); showSettingsView(userManagerCard); closeUserFormView(); enforceSingleActiveView(route); return; }
+  if (route === 'settings/users/activity') { renderRoute('settings/users'); renderUsersActivityView(); enforceSingleActiveView(route); return; }
   if (route === 'settings/users/new') { renderRoute('settings/users'); openUserFormView(); enforceSingleActiveView(route); return; }
   if (route.startsWith('settings/users/edit/')) {
     renderRoute('settings/users');
@@ -2674,6 +2776,7 @@ function applyRoute() {
 
 function navigateTo(route, opts = {}) {
   const next = normalizeRoute(route);
+  if (state.currentUser && next !== 'home' && !validateSessionPolicy({ silent: false })) return;
   ensureGlobalNavButtons();
   const current = navStack[navStack.length - 1] || 'home';
   if (opts.replace) {
@@ -2956,6 +3059,15 @@ function wireEvents() {
     closeUserFormView();
   });
   usersTable?.addEventListener('click', (e) => {
+    const toggle = e.target.closest('button[data-user-toggle-enabled]');
+    if (toggle) {
+      const user = state.users.find((u) => u.username === toggle.dataset.userToggleEnabled);
+      if (!user || user.username === 'admin') return;
+      user.enabled = user.enabled === false;
+      persist();
+      renderUsers();
+      return;
+    }
     const del = e.target.closest('button[data-user-del]');
     if (del) {
       if (del.dataset.userDel === 'admin') return;
@@ -3443,7 +3555,7 @@ async function bootstrap() {
   window.addEventListener('hashchange', () => { if (applyingRoute) return; applyRoute(); });
   setInterval(pullFromCloud, 5000);
   maybeForceLogoutFromClosure();
-  if (state.currentUser && validSession) {
+  if (state.currentUser && validSession && validateSessionPolicy({ silent: true })) {
     navStack = ['home'];
     navigateTo(normalizeRoute(window.location.hash || '#home'), { replace: true });
     if (!getActiveCashBox()) setMsg(homeMessage, 'La caja está cerrada. Espera a que un usuario autorizado la abra.', false);

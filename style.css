@@ -14,3 +14,8 @@
 
 .top-navigation{position:fixed;top:0;left:0;right:0;z-index:1300;display:flex;gap:.6rem;padding:.55rem .8rem;background:rgba(247,247,251,.96);border-bottom:1px solid var(--border);backdrop-filter:blur(3px);}
 body.with-top-navigation main,body.with-top-navigation #stockScreen{padding-top:4.2rem;}
+
+.pos-title-wrap{display:flex;align-items:center;gap:.6rem;}
+.pos-header-logo{width:56px;height:auto;object-fit:contain;display:block;}
+#warehouseTable .selected-row td{background:#fff0f0;color:#9f2222;font-weight:700;}
+#debtPaymentsNav{margin:0 0 .6rem 0;}

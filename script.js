@@ -940,7 +940,7 @@ function ensureClosingsStatsUI() {
   const card = document.createElement('div');
   card.id = 'closingsStatsCard';
   card.className = 'card';
-  card.innerHTML = '<div class="grid3"><button id="selectClosingsBtn" class="secondary" type="button">Seleccionar cierres</button><button id="generateClosingsStatsBtn" class="primary" type="button" disabled>Generar estadísticas</button><button id="downloadClosingsStatsPdfBtn" class="secondary" type="button" disabled>Descargar PDF</button></div><p id="selectedClosingsInfo" class="muted">Cantidad de cierres seleccionados: 0</p><div id="closingsStatsOutput"></div>';
+  card.innerHTML = `<div class="grid3"><button id="selectClosingsBtn" class="secondary" type="button">Seleccionar cierres</button><button id="generateClosingsStatsBtn" class="primary" type="button" disabled>Generar estadísticas</button><button id="downloadClosingsStatsPdfBtn" class="secondary" type="button" disabled>Descargar PDF</button>${isAdminUser() ? '<button id="modifyOpeningCashBtn" class="secondary" type="button">Modificar inicio de caja</button>' : ''}</div><p id="selectedClosingsInfo" class="muted">Cantidad de cierres seleccionados: 0</p><div id="closingsStatsOutput"></div>`;
   panel.insertBefore(card, panel.children[1] || null);
 }
 
@@ -972,6 +972,50 @@ function openSelectClosingsModal() {
     if (genBtn) genBtn.disabled = false;
     ov.remove();
   };
+}
+
+
+function openModifyOpeningCashModal() {
+  if (!isAdminUser()) return;
+  document.getElementById('modifyOpeningOverlay')?.remove();
+  const closings = activeClosingsList();
+  const currentId = activeClosingDetailId || closings[0]?.id || '';
+  const current = state.cashClosings.find((c) => c.id === currentId) || closings[0];
+  if (!current) return alert('No hay cierres disponibles para modificar.');
+  const ov = document.createElement('div');
+  ov.id = 'modifyOpeningOverlay';
+  ov.className = 'modal';
+  ov.innerHTML = `<div class="modal-card"><h3>Modificar inicio de caja</h3><label>Cierre<select id="modifyOpeningClosingSel">${closings.map((c) => `<option value="${c.id}" ${c.id===current.id?'selected':''}>#${String(c.id||'').slice(-8)} · ${new Date(c.closedAt).toLocaleString()}</option>`).join('')}</select></label><p id="currentOpeningText">Inicio actual: ${money(Number(current.openingCash || 0))}</p><label>Nuevo monto<input id="newOpeningCashInput" type="number" min="0" step="0.01" value="${Number(current.openingCash || 0)}" /></label><label>Contraseña admin<input id="modifyOpeningPassInput" type="password" placeholder="Contraseña admin" /></label><div class="grid2"><button id="confirmModifyOpeningBtn" class="primary" type="button">Añadir cambio</button><button id="cancelModifyOpeningBtn" class="secondary" type="button">Cancelar</button></div><p id="modifyOpeningMsg"></p></div>`;
+  document.body.appendChild(ov);
+  const sel = document.getElementById('modifyOpeningClosingSel');
+  const syncCurrent = () => {
+    const c = state.cashClosings.find((x) => x.id === sel?.value);
+    const txt = document.getElementById('currentOpeningText');
+    const inp = document.getElementById('newOpeningCashInput');
+    if (txt && c) txt.textContent = `Inicio actual: ${money(Number(c.openingCash || 0))}`;
+    if (inp && c) inp.value = String(Number(c.openingCash || 0));
+  };
+  sel?.addEventListener('change', syncCurrent);
+  document.getElementById('cancelModifyOpeningBtn')?.addEventListener('click', () => ov.remove());
+  document.getElementById('confirmModifyOpeningBtn')?.addEventListener('click', () => {
+    const admin = currentUserRecord();
+    const pass = String(document.getElementById('modifyOpeningPassInput')?.value || '');
+    const target = state.cashClosings.find((x) => x.id === sel?.value);
+    const val = Math.max(0, Number(document.getElementById('newOpeningCashInput')?.value || 0));
+    if (!admin || admin.username !== 'admin' || pass !== String(admin.password || '')) {
+      const m = document.getElementById('modifyOpeningMsg');
+      if (m) { m.textContent = 'Contraseña admin incorrecta.'; m.className = 'error'; }
+      return;
+    }
+    if (!target) return;
+    target.openingCash = val;
+    target.finalCashInBox = val + Number(target.cashIn || 0);
+    persist();
+    renderCashClosings();
+    if (activeClosingDetailId === target.id) renderClosingDetails(target.id);
+    ov.remove();
+    alert('Inicio de caja actualizado y cierre recalculado.');
+  });
 }
 
 function buildStatsFromSelectedClosings() {
@@ -1112,6 +1156,7 @@ function renderCashClosings() {
 function renderClosingDetails(closingId) {
   const closing = state.cashClosings.find((c) => c.id === closingId);
   if (!closing || !closingDetailsCard) return;
+  activeClosingDetailId = closing.id;
   closingDetailsCard.classList.remove('hidden');
   if (closingDetailsTitle) closingDetailsTitle.textContent = `Detalle de cierre #${String(closing.id || '').slice(-8)}`;
   const deletedCount = Array.isArray(closing.deletedSalesSnapshot) ? closing.deletedSalesSnapshot.length : 0;
@@ -1136,12 +1181,14 @@ function renderClosingDetails(closingId) {
   const debtQr = debtPayments.reduce((a, p) => a + Number(p.qrAmount || (p.method === 'qr' ? p.amount : 0) || 0), 0);
   const totalCash = Number(closing.cashIn || 0) + debtCash;
   const totalQr = Number(closing.qrIn || 0) + debtQr;
-  const totalOutflows = outCash + outQr;
-  const totalInflows = inCash + inQr;
   const openingCash = Number(closing.openingCash || 0);
-  const totalInBox = openingCash + totalCash - totalOutflows + totalInflows;
+  const totalCashFinal = totalCash - outCash + inCash;
+  const totalQrFinal = totalQr - outQr + inQr;
+  const totalInBox = openingCash + totalCashFinal;
   const realDelivered = totalInBox - openingCash;
-  if (closingSummaryText) closingSummaryText.innerHTML = `<div class="card"><h4>SECCIÓN 1 – INFORMACIÓN GENERAL</h4><p>Número de cierre: ${String(closing.id || '-').slice(-8)}</p><p>Fecha de apertura: ${openAt.toLocaleDateString()}</p><p>Hora de apertura: ${openAt.toLocaleTimeString()}</p><p>Fecha de cierre: ${closeAt.toLocaleDateString()}</p><p>Hora de cierre: ${closeAt.toLocaleTimeString()}</p><p>Usuario que abrió: ${closing.usuario_apertura || '-'}</p><p>Usuario que cerró: ${closing.usuario_cierre || '-'}</p><p>Tiempo total de caja abierta: ${formatDurationMs(closeAt - openAt)}</p></div><div class="card"><h4>SECCIÓN 2 – RESUMEN FINANCIERO</h4><p>Inicio de caja: ${money(openingCash)}</p><p>Total ventas brutas: ${money(grossSales)}</p><p>Total descuentos: ${money(totalDiscounts)}</p><p>Total ingresos netos: ${money(grossSales - totalDiscounts)}</p><p>Total en efectivo: ${money(totalCash)}</p><p>Total QR: ${money(totalQr)}</p><p>Total salidas de caja: ${money(totalOutflows)}</p><p>Total salidas externas: ${money(totalOutflows)}</p><p>Total entradas externas: ${money(totalInflows)}</p><p>Valor total en caja (incluye valor de caja): ${money(totalInBox)}</p><p>Valor efectivo real entregado: ${money(realDelivered)}</p></div><div class="card"><h4>SECCIÓN 3 – MÉTRICAS OPERATIVAS</h4><p>Cantidad total de ventas: ${closing.salesCount || sales.length}</p><p>Total productos vendidos: ${agg.qtyTotal}</p><p>Ticket promedio: ${money(agg.avgTicket)}</p><p>Venta más alta: ${money(agg.saleMax)}</p><p>Venta más baja: ${money(agg.saleMin)}</p><p>Ventas eliminadas: ${deletedCount} · Mov. caja: ${outflowCount} · Pagos deuda: ${debtPaymentsCount}</p></div>`;
+  const entries = (closing.outflowsSnapshot || []).filter((m) => m.direction === 'entrada');
+  const exits = (closing.outflowsSnapshot || []).filter((m) => m.direction === 'salida');
+  if (closingSummaryText) closingSummaryText.innerHTML = `<div class="card"><h4>SECCIÓN 1 – INFORMACIÓN GENERAL</h4><p>Número de cierre: ${String(closing.id || '-').slice(-8)}</p><p>Fecha de apertura: ${openAt.toLocaleDateString()}</p><p>Hora de apertura: ${openAt.toLocaleTimeString()}</p><p>Fecha de cierre: ${closeAt.toLocaleDateString()}</p><p>Hora de cierre: ${closeAt.toLocaleTimeString()}</p><p>Usuario que abrió: ${closing.usuario_apertura || '-'}</p><p>Usuario que cerró: ${closing.usuario_cierre || '-'}</p><p>Tiempo total de caja abierta: ${formatDurationMs(closeAt - openAt)}</p></div><div class="card"><h4>SECCIÓN 2 – RESUMEN FINANCIERO</h4><p>Inicio de caja: ${money(openingCash)}</p><p>Total ventas brutas: ${money(grossSales)}</p><p>Total descuentos: ${money(totalDiscounts)}</p><p>Total ingresos netos: ${money(grossSales - totalDiscounts)}</p><p>Total en efectivo: ${money(totalCash)}</p><p>Total QR: ${money(totalQr)}</p><p>Total salidas externas efectivo: ${money(outCash)}</p><p>Total salidas externas QR: ${money(outQr)}</p><p>Total entradas externas efectivo: ${money(inCash)}</p><p>Total entradas externas QR: ${money(inQr)}</p><p>Total efectivo final: ${money(totalCashFinal)}</p><p>Total QR final: ${money(totalQrFinal)}</p><p>Valor total en caja (incluye valor de caja): ${money(totalInBox)}</p><p>Valor efectivo real de venta entregado: ${money(realDelivered)}</p></div><div class="card"><h4>SECCIÓN 3 – MÉTRICAS OPERATIVAS</h4><p>Cantidad total de ventas: ${closing.salesCount || sales.length}</p><p>Total productos vendidos: ${agg.qtyTotal}</p><p>Ticket promedio: ${money(agg.avgTicket)}</p><p>Venta más alta: ${money(agg.saleMax)}</p><p>Venta más baja: ${money(agg.saleMin)}</p><p>Ventas eliminadas: ${deletedCount} · Mov. caja: ${outflowCount} · Pagos deuda: ${debtPaymentsCount}</p></div><div class="card"><h4>Detalle de entradas</h4><table><thead><tr><th>Fecha</th><th>Descripción</th><th>Método</th><th>Monto</th><th>Usuario</th></tr></thead><tbody>${entries.map((m) => `<tr><td>${new Date(m.createdAt).toLocaleString()}</td><td>${m.description || '-'}</td><td>${m.method || '-'}</td><td>${money(m.amount || 0)}</td><td>${m.user || '-'}</td></tr>`).join('') || '<tr><td colspan="5">Sin entradas.</td></tr>'}</tbody></table></div><div class="card"><h4>Detalle de salidas</h4><table><thead><tr><th>Fecha</th><th>Descripción</th><th>Método</th><th>Monto</th><th>Usuario</th></tr></thead><tbody>${exits.map((m) => `<tr><td>${new Date(m.createdAt).toLocaleString()}</td><td>${m.description || '-'}</td><td>${m.method || '-'}</td><td>${money(m.amount || 0)}</td><td>${m.user || '-'}</td></tr>`).join('') || '<tr><td colspan="5">Sin salidas.</td></tr>'}</tbody></table></div>`;
   if (closingSalesTable) closingSalesTable.innerHTML = sales.length ? sales.map((sale) => `<tr><td>${new Date(sale.createdAt).toLocaleString()}</td><td>#${orderNumberLabel(sale.orderNumber)}</td><td>${sale.payment}</td><td>${money(sale.total)}</td><td>${sale.user}</td></tr>`).join('') : '<tr><td colspan="5">Sin ventas.</td></tr>';
   if (closingProductsTable) {
     const aggProducts = agg.products;
@@ -2566,6 +2613,7 @@ async function startCashSession(openingAmount = 0) {
   renderOrders(false);
   renderSalesHistory();
   renderDebtors();
+  renderOutflows();
   console.info('[cash] caja abierta correctamente', { cashBoxId: cashBox.id });
   setMsg(homeMessage, 'Caja abierta correctamente.');
   switchToPos('ventas');
@@ -2910,6 +2958,7 @@ function closeUserFormView() {
 
 let navStack = ['home'];
 let applyingRoute = false;
+let activeClosingDetailId = '';
 
 function normalizeRoute(routeLike) {
   const raw = String(routeLike || '').replace(/^#/, '') || 'home';
@@ -3471,7 +3520,7 @@ function wireEvents() {
     if (!getActiveCashBox()) return;
     const amount = Number(outflowAmount?.value || 0);
     if (amount <= 0) return;
-    state.outflows.unshift({ id: uid(), cashBoxId: state.activeCashBoxId || '', createdAt: new Date().toISOString(), direction: outflowDirection?.value || 'salida', method: outflowMethod?.value || 'efectivo', description: outflowDescription?.value || '', amount });
+    state.outflows.unshift({ id: uid(), cashBoxId: state.activeCashBoxId || '', createdAt: new Date().toISOString(), direction: outflowDirection?.value || 'salida', method: outflowMethod?.value || 'efectivo', description: outflowDescription?.value || '', amount, user: state.currentUser?.username || '-' });
     if (outflowAmount) outflowAmount.value = '';
     if (outflowDescription) outflowDescription.value = '';
     persist();
@@ -3787,6 +3836,11 @@ function wireEvents() {
     const pdfStats = e.target.closest('#downloadClosingsStatsPdfBtn');
     if (pdfStats) {
       downloadClosingsStatsPdf();
+      return;
+    }
+    const modOpen = e.target.closest('#modifyOpeningCashBtn');
+    if (modOpen) {
+      openModifyOpeningCashModal();
       return;
     }
   });

@@ -936,6 +936,7 @@ function renderImageUploadProgress(kind, key) {
 function persistImageChange(onRollback) {
   try {
     // Guardado local directo para evitar estados "subidos" que luego se pierden.
+    state.lastSyncAt = Math.max(Number(state.lastSyncAt || 0), Date.now());
     saveLocalState();
     // Sincronización remota en segundo plano (no bloqueante).
     Promise.resolve().then(syncToCloud);
@@ -957,25 +958,35 @@ function beginImageUpload(kind, key, file, onDone) {
     return;
   }
   const startedAt = Date.now();
-  setImageUploadStatus(kind, key, { uploading: true, progress: 2, error: '' });
+  const uploadId = uid();
+  setImageUploadStatus(kind, key, { uploading: true, progress: 2, error: '', uploadId });
   const reader = new FileReader();
   reader.onprogress = (event) => {
+    const st = getImageUploadStatus(kind, key);
+    if (!st?.uploading || st.uploadId !== uploadId) return;
     if (!event.lengthComputable) return;
     const pct = Math.max(2, Math.min(95, Math.round((event.loaded / event.total) * 100)));
-    setImageUploadStatus(kind, key, { uploading: true, progress: pct, error: '' });
+    setImageUploadStatus(kind, key, { uploading: true, progress: pct, error: '', uploadId });
   };
   reader.onerror = () => {
-    setImageUploadStatus(kind, key, { uploading: false, progress: 0, error: 'No se pudo cargar la imagen.' });
+    const st = getImageUploadStatus(kind, key);
+    if (!st?.uploading || st.uploadId !== uploadId) return;
+    setImageUploadStatus(kind, key, { uploading: false, progress: 0, error: 'No se pudo cargar la imagen.', uploadId: '' });
     setTimeout(() => setImageUploadStatus(kind, key, null), 2200);
   };
   reader.onload = () => {
+    const st = getImageUploadStatus(kind, key);
+    if (!st?.uploading || st.uploadId !== uploadId) return;
     const finish = () => {
       try { onDone(String(reader.result || '')); }
-      finally { setImageUploadStatus(kind, key, null); }
+      finally {
+        const current = getImageUploadStatus(kind, key);
+        if (current?.uploadId === uploadId) setImageUploadStatus(kind, key, null);
+      }
     };
     const elapsed = Date.now() - startedAt;
     const waitMs = Math.max(0, 800 - elapsed);
-    setImageUploadStatus(kind, key, { uploading: true, progress: 100, error: '' });
+    setImageUploadStatus(kind, key, { uploading: true, progress: 100, error: '', uploadId });
     setTimeout(finish, waitMs);
   };
   reader.readAsDataURL(file);

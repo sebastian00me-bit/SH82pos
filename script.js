@@ -773,10 +773,11 @@ function openSalesModeScreen() {
   const posSel = document.getElementById('touchCartPosSel');
   if (gridSel) gridSel.value = cfg.grid;
   if (posSel) posSel.value = cfg.cartPosition;
-  document.getElementById('activateGenericModeBtn')?.addEventListener('click', () => { setSalesModeForCurrentUser('generic'); overlay.remove(); });
+  document.getElementById('activateGenericModeBtn')?.addEventListener('click', () => { setSalesModeForCurrentUser('generic'); syncSaleUiModeVisibility(); overlay.remove(); });
   document.getElementById('activateTouchModeBtn')?.addEventListener('click', () => {
     setSalesModeForCurrentUser('touch');
     setTouchUiConfigForCurrentUser({ grid: gridSel?.value || cfg.grid, cartPosition: posSel?.value || cfg.cartPosition });
+    syncSaleUiModeVisibility();
     overlay.remove();
   });
   gridSel?.addEventListener('change', () => setTouchUiConfigForCurrentUser({ grid: gridSel.value }));
@@ -856,6 +857,9 @@ function renderTouchSaleUi() {
     const item = state.currentCart.find((i) => i.id === p.id);
     const total = item.price * item.qty;
     item.finalSubtotal = total - (total * (item.discountPct || 0) / 100);
+    ui.view = 'categories';
+    ui.category = '';
+    ui.page = 0;
     renderCart();
     renderTouchSaleUi();
   }));
@@ -863,15 +867,29 @@ function renderTouchSaleUi() {
   host.querySelectorAll('[data-touch-dec]').forEach((b) => b.addEventListener('click', () => { const i = state.currentCart.find((x) => x.id === b.dataset.touchDec); if (!i) return; i.qty = Math.max(1, i.qty-1); i.finalSubtotal = i.price*i.qty - (i.price*i.qty*(i.discountPct||0)/100); renderCart(); renderTouchSaleUi(); }));
   host.querySelectorAll('[data-touch-rm]').forEach((b) => b.addEventListener('click', () => { state.currentCart = state.currentCart.filter((x) => x.id !== b.dataset.touchRm); renderCart(); renderTouchSaleUi(); }));
   host.querySelectorAll('[data-touch-tools]').forEach((b) => b.addEventListener('click', () => openTouchItemTools(b.dataset.touchTools)));
-  host.querySelector('#touchProceedPayBtn')?.addEventListener('click', () => paymentType?.scrollIntoView({ behavior:'smooth', block:'center' }));
+  host.querySelector('#touchProceedPayBtn')?.addEventListener('click', () => { const paymentCard = paymentType?.closest('.card'); paymentCard?.classList.remove('hidden'); paymentType?.scrollIntoView({ behavior:'smooth', block:'center' }); });
   host.querySelector('#touchQueueBtn')?.addEventListener('click', queueCurrentSaleDraft);
   host.querySelector('#touchQueuedBtn')?.addEventListener('click', openQueuedOrdersModal);
 }
 
-function syncSaleUiModeVisibility() {
+function setSaleModeDomVisibility() {
   const touch = currentSalesMode() === 'touch';
-  if (touch) renderTouchSaleUi();
-  else document.getElementById('touchSalesContainer')?.remove();
+  const genericBlocks = [
+    saleCategoryButtons?.closest('.card') || null,
+    cartTable?.closest('table') || null,
+    saleGrossTotal?.closest('.total-card') || null,
+    paymentType?.closest('.card') || null
+  ].filter(Boolean);
+  genericBlocks.forEach((el) => el.classList.toggle('hidden', touch));
+  if (touch) {
+    renderTouchSaleUi();
+  } else {
+    document.getElementById('touchSalesContainer')?.remove();
+  }
+}
+
+function syncSaleUiModeVisibility() {
+  setSaleModeDomVisibility();
 }
 
 function openImageUploadForProduct(productId) {
@@ -2053,8 +2071,12 @@ function openProductListView() {
 function renderProducts() {
   const selectedCategory = productCategory?.value || '';
   const sorted = state.products.slice().sort((a, b) => Number(Boolean(a.hidden)) - Number(Boolean(b.hidden)));
-  if (productsTable) productsTable.innerHTML = sorted.map((p) => `<tr><td>${p.category || '-'}</td><td>${p.name}</td><td>${money(p.price)}</td><td><button class=\"secondary\" data-prod-edit=\"${p.id}\" type=\"button\">Editar</button> <button class=\"secondary\" data-prod-img=\"${p.id}\" type=\"button\">Subir imagen</button> <button class=\"secondary\" data-prod-hide=\"${p.id}\" type=\"button\">${p.hidden ? 'Mostrar' : 'Ocultar'}</button> <button class=\"secondary\" data-prod-del=\"${p.id}\" type=\"button\">Eliminar</button></td></tr>`).join('');
-  if (categoriesTable) categoriesTable.innerHTML = (state.categories || []).map((c) => `<tr><td>${c}</td><td>${c === 'Todos' ? '-' : `<button class=\"secondary\" data-cat-img=\"${c}\" type=\"button\">Subir imagen</button> <button class=\"secondary\" data-cat-del=\"${c}\" type=\"button\">Eliminar</button>`}</td></tr>`).join('');
+  const productsHead = productsTable?.closest('table')?.querySelector('thead tr');
+  if (productsHead) productsHead.innerHTML = '<th>Categoría</th><th>Producto</th><th>Precio</th><th>Acciones</th><th>Imagen</th>';
+  const categoriesHead = categoriesTable?.closest('table')?.querySelector('thead tr');
+  if (categoriesHead) categoriesHead.innerHTML = '<th>Categoría</th><th>Acciones</th><th>Imagen</th>';
+  if (productsTable) productsTable.innerHTML = sorted.map((p) => `<tr><td>${p.category || '-'}</td><td>${p.name}</td><td>${money(p.price)}</td><td><button class=\"secondary\" data-prod-edit=\"${p.id}\" type=\"button\">Editar</button> <button class=\"secondary\" data-prod-img=\"${p.id}\" type=\"button\">Subir imagen</button> <button class=\"secondary\" data-prod-hide=\"${p.id}\" type=\"button\">${p.hidden ? 'Mostrar' : 'Ocultar'}</button> <button class=\"secondary\" data-prod-del=\"${p.id}\" type=\"button\">Eliminar</button></td><td>${p.imageDataUrl ? `<div class=\"image-cell\"><img class=\"image-thumb\" src=\"${p.imageDataUrl}\" alt=\"${p.name}\" /><button class=\"danger\" data-prod-img-del=\"${p.id}\" type=\"button\">X</button></div>` : '<span class=\"muted\">Sin imagen</span>'}</td></tr>`).join('');
+  if (categoriesTable) categoriesTable.innerHTML = (state.categories || []).map((c) => `<tr><td>${c}</td><td>${c === 'Todos' ? '-' : `<button class=\"secondary\" data-cat-img=\"${c}\" type=\"button\">Subir imagen</button> <button class=\"secondary\" data-cat-del=\"${c}\" type=\"button\">Eliminar</button>`}</td><td>${state.categoryImages?.[c] ? `<div class=\"image-cell\"><img class=\"image-thumb\" src=\"${state.categoryImages[c]}\" alt=\"${c}\" /><button class=\"danger\" data-cat-img-del=\"${c}\" type=\"button\">X</button></div>` : '<span class=\"muted\">Sin imagen</span>'}</td></tr>`).join('');
   if (productCategory) {
     productCategory.innerHTML = (state.categories || []).map((c) => `<option value="${c}">${c}</option>`).join('');
     if (selectedCategory && state.categories.includes(selectedCategory)) productCategory.value = selectedCategory;
@@ -3708,6 +3730,16 @@ function wireEvents() {
       openImageUploadForProduct(upImg.dataset.prodImg);
       return;
     }
+    const delImg = e.target.closest('button[data-prod-img-del]');
+    if (delImg) {
+      const p = state.products.find((x) => x.id === delImg.dataset.prodImgDel);
+      if (!p) return;
+      delete p.imageDataUrl;
+      persist();
+      renderProducts();
+      renderTouchSaleUi();
+      return;
+    }
     const del = e.target.closest('button[data-prod-del]');
     if (!del) return;
     state.products = state.products.filter((p) => p.id !== del.dataset.prodDel);
@@ -3719,6 +3751,8 @@ function wireEvents() {
   categoriesTable?.addEventListener('click', (e) => {
     const imgBtn = e.target.closest('button[data-cat-img]');
     if (imgBtn) { openImageUploadForCategory(imgBtn.dataset.catImg); return; }
+    const imgDelBtn = e.target.closest('button[data-cat-img-del]');
+    if (imgDelBtn) { delete state.categoryImages[imgDelBtn.dataset.catImgDel || '']; persist(); renderProducts(); renderTouchSaleUi(); return; }
     const b = e.target.closest('button[data-cat-del]');
     if (!b) return;
     const cat = b.dataset.catDel;

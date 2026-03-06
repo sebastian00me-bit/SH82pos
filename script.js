@@ -920,8 +920,12 @@ function getImageUploadStatus(kind, key) {
 
 function validateImageFile(file) {
   if (!file) return 'No se seleccionó archivo.';
-  if (!String(file.type || '').startsWith('image/')) return 'Archivo inválido. Selecciona una imagen.';
-  if (Number(file.size || 0) > MAX_IMAGE_UPLOAD_BYTES) return 'La imagen supera el límite permitido de 16 MB.';
+  const name = String(file.name || '').toLowerCase();
+  const type = String(file.type || '').toLowerCase();
+  const extOk = /\.(jpg|jpeg|png)$/.test(name);
+  const mimeOk = ['image/jpeg', 'image/jpg', 'image/png', 'image/pjpeg'].includes(type) || type.startsWith('image/');
+  if (!(extOk || mimeOk)) return 'Archivo inválido. Solo se permiten JPG, JPEG y PNG.';
+  if (Number(file.size || 0) > MAX_IMAGE_UPLOAD_BYTES) return 'La imagen supera el límite permitido de 16 MB por archivo.';
   return '';
 }
 
@@ -1000,6 +1004,7 @@ function openImageUploadForProduct(productId) {
   input.accept = 'image/*';
   input.addEventListener('change', () => {
     const f = input.files?.[0];
+    if (input) input.value = '';
     beginImageUpload('product', productId, f, (dataUrl) => {
       const previous = p.imageDataUrl;
       p.imageDataUrl = dataUrl;
@@ -1023,6 +1028,7 @@ function openImageUploadForCategory(categoryName) {
   input.accept = 'image/*';
   input.addEventListener('change', () => {
     const f = input.files?.[0];
+    if (input) input.value = '';
     beginImageUpload('category', categoryName, f, (dataUrl) => {
       const previous = state.categoryImages[categoryName] || '';
       state.categoryImages[categoryName] = dataUrl;
@@ -2194,7 +2200,7 @@ function renderProducts() {
   const categoriesHead = categoriesTable?.closest('table')?.querySelector('thead tr');
   if (categoriesHead) categoriesHead.innerHTML = '<th>Categoría</th><th>Acciones</th><th>Imagen</th>';
   if (productsTable) productsTable.innerHTML = sorted.map((p) => { const st = getImageUploadStatus('product', p.id); const uploadBtnText = st?.uploading ? 'Subiendo...' : 'Subir imagen'; const imageBlock = p.imageDataUrl ? `<div class=\"image-cell\"><img class=\"image-thumb\" src=\"${p.imageDataUrl}\" alt=\"${p.name}\" /><button class=\"danger\" data-prod-img-del=\"${p.id}\" type=\"button\">X</button></div>` : '<span class=\"muted\">Sin imagen</span>'; const err = st?.error ? `<div class=\"upload-error\">${st.error}</div>` : ''; return `<tr><td>${p.category || '-'}</td><td>${p.name}</td><td>${money(p.price)}</td><td><button class=\"secondary\" data-prod-edit=\"${p.id}\" type=\"button\">Editar</button> <button class=\"secondary\" data-prod-img=\"${p.id}\" type=\"button\" ${st?.uploading ? 'disabled' : ''}>${uploadBtnText}</button> <button class=\"secondary\" data-prod-hide=\"${p.id}\" type=\"button\">${p.hidden ? 'Mostrar' : 'Ocultar'}</button> <button class=\"secondary\" data-prod-del=\"${p.id}\" type=\"button\">Eliminar</button></td><td>${imageBlock}${renderImageUploadProgress('product', p.id)}${err}</td></tr>`; }).join('');
-  if (categoriesTable) categoriesTable.innerHTML = (state.categories || []).map((c) => { const st = getImageUploadStatus('category', c); const uploadBtnText = st?.uploading ? 'Subiendo...' : 'Subir imagen'; const imageBlock = state.categoryImages?.[c] ? `<div class=\"image-cell\"><img class=\"image-thumb\" src=\"${state.categoryImages[c]}\" alt=\"${c}\" /><button class=\"danger\" data-cat-img-del=\"${c}\" type=\"button\">X</button></div>` : '<span class=\"muted\">Sin imagen</span>'; const err = st?.error ? `<div class=\"upload-error\">${st.error}</div>` : ''; return `<tr><td>${c}</td><td>${c === 'Todos' ? '-' : `<button class=\"secondary\" data-cat-img=\"${c}\" type=\"button\" ${st?.uploading ? 'disabled' : ''}>${uploadBtnText}</button> <button class=\"secondary\" data-cat-del=\"${c}\" type=\"button\">Eliminar</button>`}</td><td>${imageBlock}${renderImageUploadProgress('category', c)}${err}</td></tr>`; }).join('');
+  if (categoriesTable) categoriesTable.innerHTML = (state.categories || []).map((c) => { const st = getImageUploadStatus('category', c); const uploadBtnText = st?.uploading ? 'Subiendo...' : 'Subir imagen'; const imageBlock = state.categoryImages?.[c] ? `<div class=\"image-cell\"><img class=\"image-thumb\" src=\"${state.categoryImages[c]}\" alt=\"${c}\" /><button class=\"danger\" data-cat-img-del=\"${c}\" type=\"button\">X</button></div>` : '<span class=\"muted\">Sin imagen</span>'; const err = st?.error ? `<div class=\"upload-error\">${st.error}</div>` : ''; return `<tr><td>${c}</td><td><button class=\"secondary\" data-cat-img=\"${c}\" type=\"button\" ${st?.uploading ? 'disabled' : ''}>${uploadBtnText}</button> ${c === 'Todos' ? '' : `<button class=\"secondary\" data-cat-del=\"${c}\" type=\"button\">Eliminar</button>`}</td><td>${imageBlock}${renderImageUploadProgress('category', c)}${err}</td></tr>`; }).join('');
   if (productCategory) {
     productCategory.innerHTML = (state.categories || []).map((c) => `<option value="${c}">${c}</option>`).join('');
     if (selectedCategory && state.categories.includes(selectedCategory)) productCategory.value = selectedCategory;

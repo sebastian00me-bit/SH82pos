@@ -49,3 +49,5 @@ body.with-top-navigation main,body.with-top-navigation #stockScreen{padding-top:
 .touch-finance{display:grid;gap:.2rem;margin-top:.5rem;color:var(--muted);}
 .people-scroll{max-height:230px;overflow-y:auto;}
 @media (max-width:900px){.touch-sales-layout.cart-right,.touch-sales-layout.cart-left{grid-template-columns:1fr;}}
+.image-cell{display:flex;align-items:center;gap:.45rem;}
+.image-thumb{width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid var(--border);}

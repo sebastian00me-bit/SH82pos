@@ -790,9 +790,6 @@ function touchGridCapacity() {
   return Math.max(1, c * r);
 }
 
-function touchPlaceholder(label='Sin imagen') {
-  return `<div class="touch-placeholder">${label}</div>`;
-}
 
 function openTouchItemTools(itemId) {
   const item = state.currentCart.find((x) => x.id === itemId);
@@ -836,11 +833,13 @@ function renderTouchSaleUi() {
   const pageItems = list.slice(ui.page * cap, (ui.page + 1) * cap);
   const renderCard = (item) => {
     if (ui.view === 'categories') {
-      const img = state.categoryImages?.[item] ? `<img src="${state.categoryImages[item]}" alt="${item}" />` : touchPlaceholder('Categoría');
-      return `<button class="touch-card" data-touch-cat="${item}" type="button">${img}<strong>${item}</strong></button>`;
+      const hasImg = Boolean(state.categoryImages?.[item]);
+      const img = hasImg ? `<img class="touch-media" src="${state.categoryImages[item]}" alt="${item}" />` : '';
+      return `<button class="touch-card ${hasImg ? 'with-image' : 'no-image'}" data-touch-cat="${item}" type="button">${img}<strong class="touch-card-title">${item}</strong></button>`;
     }
-    const img = item.imageDataUrl ? `<img src="${item.imageDataUrl}" alt="${item.name}" />` : touchPlaceholder('Producto');
-    return `<button class="touch-card" data-touch-prod="${item.id}" type="button">${img}<strong>${item.name}</strong><span>${money(item.price)}</span></button>`;
+    const hasImg = Boolean(item.imageDataUrl);
+    const img = hasImg ? `<img class="touch-media" src="${item.imageDataUrl}" alt="${item.name}" />` : '';
+    return `<button class="touch-card ${hasImg ? 'with-image' : 'no-image'}" data-touch-prod="${item.id}" type="button">${img}<strong class="touch-card-title">${item.name}</strong><span class="touch-card-price">${money(item.price)}</span></button>`;
   };
   host.className = `touch-sales-layout cart-${cfg.cartPosition}`;
   host.innerHTML = `<div class="touch-main"><div class="touch-toolbar">${ui.view === 'products' ? '<button id="touchBackToCats" class="secondary" type="button">Volver a categorías</button>' : '<span></span>'}<div class="touch-pager"><button id="touchPrevPage" class="secondary" type="button">◀</button><span>Página ${ui.page + 1}/${pages}</span><button id="touchNextPage" class="secondary" type="button">▶</button></div></div><div class="touch-grid" style="--touch-cols:${getTouchUiConfig().grid.split('x')[0]};">${pageItems.map(renderCard).join('')}</div></div><aside class="touch-cart"><h3>Lista de compras</h3><div class="touch-cart-items">${state.currentCart.length ? state.currentCart.map((i) => `<div class="touch-cart-item"><div><strong>${i.name}</strong><small>${money(i.price)} c/u · Total ${money(Number(i.finalSubtotal ?? (i.price*i.qty)))}</small></div><div class="touch-qty"><button data-touch-dec="${i.id}" type="button">-</button><span>${i.qty}</span><button data-touch-inc="${i.id}" type="button">+</button><button data-touch-tools="${i.id}" type="button">🛠</button><button data-touch-rm="${i.id}" type="button">✕</button></div></div>`).join('') : '<p>Sin productos añadidos.</p>'}</div><div class="touch-summary"><p>Subtotal: ${money(saleTotals().gross)}</p><p>Descuento: ${money(saleTotals().discount)}</p><p><strong>Total: ${money(saleTotals().final)}</strong></p></div><button id="touchProceedPayBtn" class="primary" type="button">Proceder con el pago</button><div class="grid2"><button id="touchQueueBtn" class="secondary" type="button">Añadir a la cola</button><button id="touchQueuedBtn" class="secondary" type="button">Ver pedidos pendientes</button></div><div class="touch-finance"><small>Total de caja: ${cashTotalBox?.textContent || money(0)}</small><small>Cambio final más efectivo del día: ${summaryFinalCash?.textContent || money(0)}</small><small>Total de QR del día: ${summaryFinalQr?.textContent || money(0)}</small></div></aside>`;

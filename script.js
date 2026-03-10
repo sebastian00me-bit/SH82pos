@@ -313,6 +313,18 @@ const billingConfigStatus = $('billingConfigStatus');
 const billingModeIndicator = $('billingModeIndicator');
 const billingLogoCurrentPreview = $('billingLogoCurrentPreview');
 const billingLogoCurrentText = $('billingLogoCurrentText');
+const billingToggleActionBtn = $('billingToggleActionBtn');
+const billingLogoSizeInput = $('billingLogoSizeInput');
+const billingTitleSizeInput = $('billingTitleSizeInput');
+const billingTitleBoldInput = $('billingTitleBoldInput');
+const billingTitleFontInput = $('billingTitleFontInput');
+const billingLogoTitleGapInput = $('billingLogoTitleGapInput');
+const billingMessage1SizeInput = $('billingMessage1SizeInput');
+const billingMessage1BoldInput = $('billingMessage1BoldInput');
+const billingMessage1FontInput = $('billingMessage1FontInput');
+const billingMessage2SizeInput = $('billingMessage2SizeInput');
+const billingMessage2BoldInput = $('billingMessage2BoldInput');
+const billingMessage2FontInput = $('billingMessage2FontInput');
 const closeCashBtnCard = $('closeCashBtn');
 let activeSaleCategory = '';
 let activeOrderId = '';
@@ -372,7 +384,18 @@ const defaultBillingConfig = {
   paperWidthMm: 80,
   marginMm: 4,
   message1: 'Gracias por su compra',
-  message2: 'SHALOM'
+  message2: 'SHALOM',
+  logoSizeMm: 28,
+  titleSizePt: 12,
+  titleBold: true,
+  titleFont: 'helvetica',
+  logoTitleGapMm: 8,
+  message1SizePt: 9,
+  message1Bold: false,
+  message1Font: 'helvetica',
+  message2SizePt: 9,
+  message2Bold: false,
+  message2Font: 'helvetica'
 };
 
 function normalizeBillingSettings() {
@@ -385,6 +408,17 @@ function normalizeBillingSettings() {
   merged.currencySymbol = String(merged.currencySymbol || defaultBillingConfig.currencySymbol);
   merged.message1 = String(merged.message1 || '');
   merged.message2 = String(merged.message2 || '');
+  merged.logoSizeMm = Math.max(12, Math.min(60, Number(merged.logoSizeMm || 28)));
+  merged.titleSizePt = Math.max(9, Math.min(24, Number(merged.titleSizePt || 12)));
+  merged.titleBold = merged.titleBold !== false;
+  merged.titleFont = ['helvetica', 'times', 'courier'].includes(String(merged.titleFont || 'helvetica')) ? String(merged.titleFont || 'helvetica') : 'helvetica';
+  merged.logoTitleGapMm = Math.max(2, Math.min(24, Number(merged.logoTitleGapMm || 8)));
+  merged.message1SizePt = Math.max(7, Math.min(18, Number(merged.message1SizePt || 9)));
+  merged.message1Bold = Boolean(merged.message1Bold);
+  merged.message1Font = ['helvetica', 'times', 'courier'].includes(String(merged.message1Font || 'helvetica')) ? String(merged.message1Font || 'helvetica') : 'helvetica';
+  merged.message2SizePt = Math.max(7, Math.min(18, Number(merged.message2SizePt || 9)));
+  merged.message2Bold = Boolean(merged.message2Bold);
+  merged.message2Font = ['helvetica', 'times', 'courier'].includes(String(merged.message2Font || 'helvetica')) ? String(merged.message2Font || 'helvetica') : 'helvetica';
   state.settings.billing = merged;
   return merged;
 }
@@ -1314,7 +1348,19 @@ function applySettings() {
   if (billingMarginInput) billingMarginInput.value = String(Number(billing.marginMm || 4));
   if (billingMessage1Input) billingMessage1Input.value = billing.message1 || '';
   if (billingMessage2Input) billingMessage2Input.value = billing.message2 || '';
+  if (billingLogoSizeInput) billingLogoSizeInput.value = String(Number(billing.logoSizeMm || 28));
+  if (billingTitleSizeInput) billingTitleSizeInput.value = String(Number(billing.titleSizePt || 12));
+  if (billingTitleBoldInput) billingTitleBoldInput.checked = Boolean(billing.titleBold);
+  if (billingTitleFontInput) billingTitleFontInput.value = billing.titleFont || 'helvetica';
+  if (billingLogoTitleGapInput) billingLogoTitleGapInput.value = String(Number(billing.logoTitleGapMm || 8));
+  if (billingMessage1SizeInput) billingMessage1SizeInput.value = String(Number(billing.message1SizePt || 9));
+  if (billingMessage1BoldInput) billingMessage1BoldInput.checked = Boolean(billing.message1Bold);
+  if (billingMessage1FontInput) billingMessage1FontInput.value = billing.message1Font || 'helvetica';
+  if (billingMessage2SizeInput) billingMessage2SizeInput.value = String(Number(billing.message2SizePt || 9));
+  if (billingMessage2BoldInput) billingMessage2BoldInput.checked = Boolean(billing.message2Bold);
+  if (billingMessage2FontInput) billingMessage2FontInput.value = billing.message2Font || 'helvetica';
   if (billingModeIndicator) billingModeIndicator.textContent = `Estado actual: ${billing.enabled ? 'ACTIVADO' : 'DESACTIVADO'}`;
+  if (billingToggleActionBtn) billingToggleActionBtn.textContent = billing.enabled ? 'Desactivar' : 'Activar';
   if (billingLogoCurrentPreview && billingLogoCurrentText) {
     if (billing.logoDataUrl) {
       billingLogoCurrentPreview.src = billing.logoDataUrl;
@@ -2658,12 +2704,15 @@ async function openSaleInvoiceWindow(sale, options = {}) {
     let y = margin + 2;
     if (cfg.logoDataUrl) {
       try {
-        doc.addImage(cfg.logoDataUrl, imageFormat, (width / 2) - 14, y, 28, 20);
-        y += 28;
+        const logoW = Math.max(12, Math.min(60, Number(cfg.logoSizeMm || 28)));
+        const logoH = Math.max(8, logoW * 0.7);
+        doc.addImage(cfg.logoDataUrl, imageFormat, (width / 2) - (logoW / 2), y, logoW, logoH);
+        y += logoH + Math.max(2, Number(cfg.logoTitleGapMm || 8));
       } catch {}
     }
-    doc.setFontSize(12);
-    doc.text(String(cfg.title || 'RECIBO'), width / 2, y, { align: 'center' });
+    doc.setFont(String(cfg.titleFont || 'helvetica'), cfg.titleBold ? 'bold' : 'normal');
+    doc.setFontSize(Math.max(9, Number(cfg.titleSizePt || 12)));
+    doc.text(String(cfg.title || 'RECIBO'), width / 2, y, { align: 'center', maxWidth: width - (margin * 2) });
     y += 5;
     const dt = new Date(data.createdAt || Date.now());
     doc.setFontSize(9);
@@ -2678,8 +2727,11 @@ async function openSaleInvoiceWindow(sale, options = {}) {
     y = doc.lastAutoTable.finalY + 2;
     const totalsRows = [['Cantidad artículos', String(Number(data.totalItems || 0))], ['Subtotal', `${symbol} ${Number(data.subtotal || 0).toFixed(2)}`]];
     if (Number(data.discount || 0) > 0) totalsRows.push(['Descuento', `${symbol} ${Number(data.discount || 0).toFixed(2)}`]);
-    totalsRows.push(['TOTAL', `${symbol} ${Number(data.total || 0).toFixed(2)}`]);
-    doc.autoTable({ startY: y, margin: { left: margin, right: margin }, body: totalsRows, styles: { fontSize: 9, cellPadding: 1.1 }, theme: 'plain', columnStyles: { 1: { halign: 'right', fontStyle: 'bold' } } });
+    doc.autoTable({ startY: y, margin: { left: margin, right: margin }, body: totalsRows, styles: { fontSize: 9, cellPadding: 1.1 }, theme: 'plain', columnStyles: { 1: { halign: 'right' } } });
+    y = doc.lastAutoTable.finalY + 1;
+    doc.setLineDashPattern([1, 1], 0);
+    doc.line(margin, y, width - margin, y); y += 1.2;
+    doc.autoTable({ startY: y, margin: { left: margin, right: margin }, body: [['TOTAL', `${symbol} ${Number(data.total || 0).toFixed(2)}`]], styles: { fontSize: 11, cellPadding: 1.3, fontStyle: 'bold' }, theme: 'plain', columnStyles: { 1: { halign: 'right', fontStyle: 'bold' } } });
     y = doc.lastAutoTable.finalY + 2;
     doc.setLineDashPattern([1, 1], 0);
     doc.line(margin, y, width - margin, y); y += 2;
@@ -2688,9 +2740,12 @@ async function openSaleInvoiceWindow(sale, options = {}) {
     y = doc.lastAutoTable.finalY + 3;
     doc.setLineDashPattern([1, 1], 0);
     doc.line(margin, y, width - margin, y); y += 5;
-    doc.setFontSize(9);
+    doc.setFont(String(cfg.message1Font || 'helvetica'), cfg.message1Bold ? 'bold' : 'normal');
+    doc.setFontSize(Math.max(7, Number(cfg.message1SizePt || 9)));
     if (cfg.message1) { doc.text(String(cfg.message1), width / 2, y, { align: 'center', maxWidth: width - (margin * 2) }); y += 5; }
-    if (cfg.message2) doc.text(String(cfg.message2), width / 2, y, { align: 'center' });
+    doc.setFont(String(cfg.message2Font || 'helvetica'), cfg.message2Bold ? 'bold' : 'normal');
+    doc.setFontSize(Math.max(7, Number(cfg.message2SizePt || 9)));
+    if (cfg.message2) doc.text(String(cfg.message2), width / 2, y, { align: 'center', maxWidth: width - (margin * 2) });
 
     const blobUrl = doc.output('bloburl');
     const win = window.open(blobUrl, '_blank');
@@ -3476,7 +3531,7 @@ async function registerSale() {
   state.sales.unshift(sale);
   state.currentCart = [];
   persist();
-  if (billingSettings().enabled) await openSaleInvoiceWindow(sale, { syncBeforeOpen: true });
+  if (billingSettings().enabled) await openSaleInvoiceWindow(sale, { syncBeforeOpen: false });
   renderCart();
   renderOrders(false);
   setMsg(saleMessage, 'Venta registrada correctamente.');
@@ -3889,6 +3944,17 @@ function saveBillingSettings() {
   billing.marginMm = Math.max(0, Math.min(20, Number(billingMarginInput?.value || billing.marginMm || 4)));
   billing.message1 = String(billingMessage1Input?.value || '').trim();
   billing.message2 = String(billingMessage2Input?.value || '').trim();
+  billing.logoSizeMm = Math.max(12, Math.min(60, Number(billingLogoSizeInput?.value || billing.logoSizeMm || 28)));
+  billing.titleSizePt = Math.max(9, Math.min(24, Number(billingTitleSizeInput?.value || billing.titleSizePt || 12)));
+  billing.titleBold = Boolean(billingTitleBoldInput?.checked);
+  billing.titleFont = String(billingTitleFontInput?.value || billing.titleFont || 'helvetica');
+  billing.logoTitleGapMm = Math.max(2, Math.min(24, Number(billingLogoTitleGapInput?.value || billing.logoTitleGapMm || 8)));
+  billing.message1SizePt = Math.max(7, Math.min(18, Number(billingMessage1SizeInput?.value || billing.message1SizePt || 9)));
+  billing.message1Bold = Boolean(billingMessage1BoldInput?.checked);
+  billing.message1Font = String(billingMessage1FontInput?.value || billing.message1Font || 'helvetica');
+  billing.message2SizePt = Math.max(7, Math.min(18, Number(billingMessage2SizeInput?.value || billing.message2SizePt || 9)));
+  billing.message2Bold = Boolean(billingMessage2BoldInput?.checked);
+  billing.message2Font = String(billingMessage2FontInput?.value || billing.message2Font || 'helvetica');
   const applyPersist = () => {
     state.settings.billing = { ...billing };
     persist();
@@ -4099,6 +4165,12 @@ function wireEvents() {
   enableOrdersBtn?.addEventListener('click', () => { tempConfig.activarPedidos = true; if (salesConfigStatus) salesConfigStatus.textContent = 'Cambio pendiente: Pedidos ACTIVADOS'; });
   disableOrdersBtn?.addEventListener('click', () => { tempConfig.activarPedidos = false; if (salesConfigStatus) salesConfigStatus.textContent = 'Cambio pendiente: Pedidos DESACTIVADOS'; });
   applySalesConfigBtn?.addEventListener('click', () => saveMainSettings());
+  billingToggleActionBtn?.addEventListener('click', () => {
+    if (billingEnabledInput) billingEnabledInput.checked = !billingEnabledInput.checked;
+    const active = Boolean(billingEnabledInput?.checked);
+    if (billingModeIndicator) billingModeIndicator.textContent = `Estado actual: ${active ? 'ACTIVADO' : 'DESACTIVADO'}`;
+    if (billingToggleActionBtn) billingToggleActionBtn.textContent = active ? 'Desactivar' : 'Activar';
+  });
   saveBillingConfigBtn?.addEventListener('click', saveBillingSettings);
   removeBillingLogoBtn?.addEventListener('click', () => {
     const billing = normalizeBillingSettings();
@@ -4648,6 +4720,7 @@ async function bootstrap() {
   applySettings();
   ensureSalesModeButton();
   wireEvents();
+  Promise.resolve().then(() => ensureJsPdfLibs()).catch(() => {});
   renderOrdersVisibility();
   beginSessionWatcher();
   renderSaleSelectors();

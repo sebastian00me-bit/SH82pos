@@ -359,7 +359,8 @@ let appConfig = {
 let cloudPullInFlight = null;
 let cloudSyncTimer = null;
 let lastCloudPullAt = 0;
-const CLOUD_PULL_MIN_INTERVAL_MS = 5000;
+const CLOUD_PULL_MIN_INTERVAL_MS = 800;
+const CLOUD_POLL_INTERVAL_MS = 1200;
 
 function syncAppConfig() {
   appConfig = {
@@ -563,6 +564,13 @@ function cloudRootUrl() {
   if (!base) return '';
   const token = state.settings?.firebaseDbToken ? `?auth=${encodeURIComponent(state.settings.firebaseDbToken)}` : '';
   return `${base}/${state.settings.firebaseDbPath || SHARED_DB_PATH}.json${token}`;
+}
+
+function cloudChildUrl(childPath = '') {
+  const root = cloudRootUrl();
+  if (!root) return '';
+  const safeChild = String(childPath || '').replace(/^\/+/, '');
+  return safeChild ? root.replace(/\.json(\?.*)?$/, `/${safeChild}.json$1`) : root;
 }
 
 function blobToDataUrl(blob) {
@@ -3368,8 +3376,13 @@ async function pullFromCloud(options = {}) {
   try {
     lastCloudPullAt = Date.now();
     const token = state.settings.firebaseDbToken ? `?auth=${encodeURIComponent(state.settings.firebaseDbToken)}` : '';
-    const url = `${state.settings.firebaseDbUrl.replace(/\/$/, '')}/${state.settings.firebaseDbPath || SHARED_DB_PATH}.json${token}`;
-    const r = await fetch(url);
+    const rootUrl = `${state.settings.firebaseDbUrl.replace(/\/$/, '')}/${state.settings.firebaseDbPath || SHARED_DB_PATH}.json${token}`;
+    if (!options.force) {
+      const stampResp = await fetch(rootUrl.replace(/\.json(\?.*)?$/, '/updatedAt.json$1'));
+      const remoteStamp = Number(await stampResp.json() || 0);
+      if (!remoteStamp || remoteStamp <= Number(state.lastSyncAt || 0)) return;
+    }
+    const r = await fetch(rootUrl);
     const data = await r.json();
     if (!data || !data.updatedAt) return;
     if (!options.force && data.updatedAt <= state.lastSyncAt) {
@@ -3788,19 +3801,21 @@ async function registerSale() {
   state.sales.unshift(sale);
   state.currentCart = [];
   persist({ sync: false });
-  try {
-    await syncToCloud();
-    await pullFromCloud({ force: true });
-    if (!state.sales.some((x) => x.id === sale.id)) {
-      state.sales.unshift(sale);
-      persist({ sync: false });
-      await syncToCloud();
-      await pullFromCloud({ force: true });
-    }
-  } catch (err) {
-    console.error('[sale] sync failed', err);
-    scheduleCloudSync(250);
-  }
+  Promise.resolve()
+    .then(() => syncToCloud())
+    .then(() => pullFromCloud({ force: true }))
+    .then(() => {
+      if (!state.sales.some((x) => x.id === sale.id)) {
+        state.sales.unshift(sale);
+        persist({ sync: false });
+        return syncToCloud().then(() => pullFromCloud({ force: true }));
+      }
+      return null;
+    })
+    .catch((err) => {
+      console.error('[sale] async sync failed', err);
+      scheduleCloudSync(250);
+    });
   const billingCfg = billingSettings();
   if (billingCfg.enabled) {
     Promise.resolve(openSaleInvoiceWindow(sale, { syncBeforeOpen: false, autoPrint: Boolean(billingCfg.autoPrintEnabled) }))
@@ -5090,7 +5105,7 @@ async function bootstrap() {
   const validSession = Boolean(state.currentUser && currentUserRecord());
   window.addEventListener('storage', (e) => { if (!e.key || !e.key.startsWith('cafeteria_')) return; pullFromCloud({ force: true }); });
   window.addEventListener('hashchange', () => { if (applyingRoute) return; applyRoute(); });
-  setInterval(() => { if (document.hidden) return; pullFromCloud(); }, 5000);
+  setInterval(() => { if (document.hidden) return; pullFromCloud(); }, CLOUD_POLL_INTERVAL_MS);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) pullFromCloud({ force: true }); });
   window.addEventListener('online', () => { pullFromCloud({ force: true }); });
   Promise.resolve().then(() => migrateCategoryImageRefsToDataUrls()).catch(() => {});
